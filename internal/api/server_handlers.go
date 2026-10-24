@@ -1,0 +1,235 @@
+package api
+
+import (
+	"context"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"frp-panel/internal/frp"
+)
+
+// history keeps recent frps traffic counters so the UI can draw rates.
+type sample struct {
+	T     int64 `json:"t"`
+	In    int64 `json:"in"`
+	Out   int64 `json:"out"`
+	Conns int64 `json:"conns"`
+}
+
+type history struct {
+	mu  sync.Mutex
+	cap int
+	buf []sample
+}
+
+func newHistory(n int) *history { return &history{cap: n} }
+
+func (h *history) add(s sample) {
+	h.mu.Lock()
+	h.buf = append(h.buf, s)
+	if len(h.buf) > h.cap {
+		h.buf = h.buf[len(h.buf)-h.cap:]
+	}
+	h.mu.Unlock()
+}
+
+func (h *history) list() []sample {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]sample(nil), h.buf...)
+}
+
+func (a *App) sample(ctx context.Context) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		if d, err := a.loadDoc(); err == nil {
+			if si, err := frp.AdminFromDoc(d).ServerInfo(); err == nil {
+				a.hist.add(sample{T: time.Now().Unix(), In: si.TotalTrafficIn, Out: si.TotalTrafficOut, Conns: si.CurConns})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (a *App) handleServerOverview(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"service": a.Proc.Status(), "history": a.hist.list()}
+	d, err := a.loadDoc()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	out["settings"] = frp.ReadServer(d)
+	api := frp.AdminFromDoc(d)
+	if si, err := api.ServerInfo(); err == nil {
+		out["info"] = si
+		if ps, err := api.ServerProxies(); err == nil {
+			online := 0
+			for _, p := range ps {
+				if p.Status == "online" {
+					online++
+				}
+			}
+			out["proxyTotal"], out["proxyOnline"] = len(ps), online
+		}
+	} else {
+		out["infoError"] = "无法连接 frps 管理接口（服务可能未运行）"
+	}
+	writeJSON(w, 200, out)
+}
+
+func (a *App) handleServerSettingsGet(w http.ResponseWriter, r *http.Request) {
+	d, err := a.loadDoc()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, frp.ReadServer(d))
+}
+
+func (a *App) handleServerSettingsPut(w http.ResponseWriter, r *http.Request) {
+	var s frp.ServerSettings
+	if !readJSON(w, r, &s) {
+		return
+	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	old, err := a.loadDoc()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	d, _ := frp.ParseDoc(mustMarshal(old))
+	if err := frp.ApplyServer(d, s); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	msg, err := a.applyDoc(old, d)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"message": msg, "firewallPorts": frp.ServerPorts(d)})
+}
+
+func mustMarshal(d frp.Doc) []byte {
+	b, _ := d.Marshal()
+	return b
+}
+
+func (a *App) handleServerProxies(w http.ResponseWriter, r *http.Request) {
+	d, err := a.loadDoc()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	api := frp.AdminFromDoc(d)
+	ps, err := api.ServerProxies()
+	if err != nil {
+		writeErr(w, 502, "无法连接 frps 管理接口（服务可能未运行）")
+		return
+	}
+	names := map[string]string{}
+	for _, c := range api.ServerClients() {
+		names[c.ClientID] = c.Hostname
+	}
+	type row struct {
+		frp.ServerProxy
+		Hostname string `json:"hostname"`
+	}
+	rows := make([]row, 0, len(ps))
+	for _, p := range ps {
+		rows = append(rows, row{p, names[p.ClientID]})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Status != rows[j].Status {
+			return rows[i].Status == "online"
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	writeJSON(w, 200, map[string]any{"proxies": rows})
+}
+
+func (a *App) handleServerClients(w http.ResponseWriter, r *http.Request) {
+	d, err := a.loadDoc()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	api := frp.AdminFromDoc(d)
+	cs := api.ServerClients()
+	counts := map[string]int{}
+	if ps, err := api.ServerProxies(); err == nil {
+		for _, p := range ps {
+			if p.Status == "online" {
+				counts[p.ClientID]++
+			}
+		}
+	}
+	type row struct {
+		frp.ServerClient
+		Proxies int `json:"proxies"`
+	}
+	rows := make([]row, 0, len(cs))
+	for _, c := range cs {
+		rows = append(rows, row{c, counts[c.ClientID]})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Online != rows[j].Online {
+			return rows[i].Online
+		}
+		return rows[i].LastConnectedAt > rows[j].LastConnectedAt
+	})
+	writeJSON(w, 200, map[string]any{"clients": rows})
+}
+
+// shellQuote wraps s in single quotes for a POSIX shell.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+func (a *App) handleServerJoin(w http.ResponseWriter, r *http.Request) {
+	cfg := a.St.Get()
+	d, err := a.loadDoc()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s := frp.ReadServer(d)
+	addr := cfg.PublicAddr
+	if addr == "" {
+		addr = r.Host
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			addr = h
+		}
+		addr = strings.Trim(addr, "[]")
+	}
+	script := cfg.InstallScriptURL
+	if script == "" {
+		script = DefaultInstallScriptURL
+	}
+	if cfg.GithubMirror != "" && strings.HasPrefix(script, "https://raw.githubusercontent.com/") {
+		script = strings.TrimRight(cfg.GithubMirror, "/") + "/" + script
+	}
+	cmd := "curl -fsSL " + shellQuote(script) + " | sudo bash -s -- client" +
+		" --server " + shellQuote(addr) +
+		" --port " + strconv.Itoa(s.BindPort) +
+		" --token " + shellQuote(s.Token)
+	if cfg.GithubMirror != "" {
+		cmd += " --mirror " + shellQuote(cfg.GithubMirror)
+	}
+	writeJSON(w, 200, map[string]any{
+		"command": cmd, "serverAddr": addr, "serverPort": s.BindPort, "token": s.Token,
+		"tlsForce": s.TLSForce, "publicAddrSet": cfg.PublicAddr != "",
+	})
+}
+
+// DefaultInstallScriptURL is overridden at build time with -ldflags.
+var DefaultInstallScriptURL = "https://raw.githubusercontent.com/wangmancang520/frp-panel/main/install.sh"
