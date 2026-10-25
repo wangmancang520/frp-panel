@@ -210,6 +210,7 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; font-family
 .badge.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
 .badge.err { background: var(--err-soft); color: var(--err); border-color: transparent; }
 .badge.accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.badge svg { width: 12px; height: 12px; flex: none; }
 .badge.type { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .03em; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
 .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
@@ -331,6 +332,9 @@ details.adv summary { cursor: pointer; color: var(--text-2); font-weight: 550; m
 .strength i { display: block; height: 100%; transition: width .2s, background .2s; }
 
 .spin { animation: spin 1s linear infinite; }
+.spinner { display: inline-flex; color: var(--text-3); }
+.spinner svg { width: 20px; height: 20px; }
+.boot .spinner svg { width: 28px; height: 28px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .muted { color: var(--text-3); }
 .small { font-size: 12.5px; }

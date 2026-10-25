@@ -240,7 +240,7 @@ export function Empty({ text, children }) {
 }
 
 export function Spinner() {
-  return html`<span class="muted">${icon('loader', 'spin')}</span>`;
+  return html`<span class="spinner" role="status" aria-label="加载中">${icon('loader', 'spin')}</span>`;
 }
 
 export function ServiceBadge({ s }) {
