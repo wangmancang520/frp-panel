@@ -98,8 +98,8 @@ func (a *App) startACMEHTTP() {
 	a.acmeOnce.Do(func() {
 		_, port, _ := net.SplitHostPort(a.St.Get().Listen)
 		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if am := a.TLS.ACMEHandler(); am != nil && strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
-				am.HTTPHandler(nil).ServeHTTP(w, r)
+			if ah := a.TLS.ACMEHTTPHandler(); ah != nil && strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+				ah.ServeHTTP(w, r)
 				return
 			}
 			host := r.Host

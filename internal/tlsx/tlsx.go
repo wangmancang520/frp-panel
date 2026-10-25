@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -190,6 +191,8 @@ type Manager struct {
 	custom  *tls.Certificate
 	acme    *autocert.Manager
 	acmeErr string
+	// acmeHTTP serves HTTP-01 challenges while in ACME mode.
+	acmeHTTP http.Handler
 }
 
 func NewManager(dir string) *Manager { return &Manager{dir: dir} }
@@ -228,7 +231,13 @@ func (m *Manager) Configure(mode, domain, email string, extraSANs []string) erro
 		}
 	}
 	m.mu.Lock()
-	m.mode, m.domain, m.self, m.custom, m.acme, m.acmeErr = mode, strings.ToLower(domain), &self, custom, am, ""
+	// autocert only offers the HTTP-01 challenge once HTTPHandler has been
+	// called, so build it now rather than on the first port-80 request.
+	var ah http.Handler
+	if am != nil {
+		ah = am.HTTPHandler(nil)
+	}
+	m.mode, m.domain, m.self, m.custom, m.acme, m.acmeHTTP, m.acmeErr = mode, strings.ToLower(domain), &self, custom, am, ah, ""
 	m.mu.Unlock()
 	return nil
 }
@@ -289,11 +298,11 @@ func (m *Manager) TLSConfig() *tls.Config {
 	}
 }
 
-// ACMEHandler exposes the ACME manager for HTTP-01 challenges (nil unless in ACME mode).
-func (m *Manager) ACMEHandler() *autocert.Manager {
+// ACMEHTTPHandler serves HTTP-01 challenges (nil unless in ACME mode).
+func (m *Manager) ACMEHTTPHandler() http.Handler {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.acme
+	return m.acmeHTTP
 }
 
 func (m *Manager) SetACMEError(e string) {

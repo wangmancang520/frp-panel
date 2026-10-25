@@ -115,10 +115,13 @@ func (a *App) handleClientProxies(w http.ResponseWriter, r *http.Request) {
 				row.PublicURL = net.JoinHostPort(common.ServerAddr, port)
 			}
 		case "http", "https":
-			if len(p.CustomDomains) > 0 {
+			// frpc reports host:vhostPort, which is the address users can open.
+			if row.RemoteAddr != "" {
+				host := strings.TrimPrefix(strings.TrimPrefix(row.RemoteAddr, "http://"), "https://")
+				host = strings.TrimSuffix(host, map[string]string{"http": ":80", "https": ":443"}[p.Type])
+				row.PublicURL = p.Type + "://" + host
+			} else if len(p.CustomDomains) > 0 {
 				row.PublicURL = p.Type + "://" + p.CustomDomains[0]
-			} else if row.RemoteAddr != "" {
-				row.PublicURL = p.Type + "://" + strings.TrimPrefix(strings.TrimPrefix(row.RemoteAddr, "http://"), "https://")
 			}
 		}
 		rows = append(rows, row)
