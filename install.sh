@@ -326,6 +326,10 @@ fetch_panel() {
     install -m 0755 "$tmp/frp-panel" "$WORK/frp-panel"
   fi
   NEW_PANEL_VERSION=$("$WORK/frp-panel" version 2>/dev/null) || die "新的 frp-panel 无法运行"
+  # Releases before central client management lack the embedded script
+  # (and the agent); installing one would leave a half-working setup.
+  "$WORK/frp-panel" install-script >/dev/null 2>&1 \
+    || die "frp-panel v${NEW_PANEL_VERSION} 版本过旧，与本脚本不匹配（缺少客户端集中管理）。请使用更新的发布版本（--panel-version），或用 build.sh 编译后通过 --panel-bin 指定"
 }
 
 place_panel() {
