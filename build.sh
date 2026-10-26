@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || echo 0.1.0)}"
 VERSION="${VERSION#v}"
 PANEL_REPO="${PANEL_REPO:-wangmancang520/frp-panel}"
-LDFLAGS="-s -w -X main.version=${VERSION} -X frp-panel/internal/api.DefaultInstallScriptURL=https://raw.githubusercontent.com/${PANEL_REPO}/main/install.sh"
+LDFLAGS="-s -w -X main.version=${VERSION} -X frp-panel/internal/api.PanelRepo=${PANEL_REPO}"
 
 rm -rf dist && mkdir -p dist
 build() { # GOARCH name [GOARM]

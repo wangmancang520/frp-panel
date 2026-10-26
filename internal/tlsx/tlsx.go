@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -93,11 +94,16 @@ func LocalSANs(extra []string) (dns []string, ips []net.IP) {
 	return dns, ips
 }
 
-// GenerateSelfSigned writes a fresh ECDSA P-256 certificate to dir.
+// GenerateSelfSigned writes a fresh ECDSA P-256 certificate to dir. An
+// existing key is kept, so the public-key pin managed clients use to trust
+// the panel stays valid when the certificate is regenerated.
 func GenerateSelfSigned(dir string, extra []string) error {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := loadECKey(filepath.Join(dir, selfKey))
 	if err != nil {
-		return err
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return err
+		}
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
@@ -131,6 +137,42 @@ func GenerateSelfSigned(dir string, extra []string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, selfCert), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
+}
+
+func loadECKey(path string) (*ecdsa.PrivateKey, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return nil, errors.New("invalid key file")
+	}
+	return x509.ParseECPrivateKey(blk.Bytes)
+}
+
+// SPKIPin is the curl --pinnedpubkey form ("sha256//<base64>") of a
+// certificate's public key.
+func SPKIPin(spki []byte) string {
+	sum := sha256.Sum256(spki)
+	return "sha256//" + base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// SelfSignedPin returns the public-key pin of the self-signed certificate.
+func SelfSignedPin(dir string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, selfCert))
+	if err != nil {
+		return "", err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return "", errors.New("invalid certificate file")
+	}
+	x, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return "", err
+	}
+	return SPKIPin(x.RawSubjectPublicKeyInfo), nil
 }
 
 func Fingerprint(der []byte) string {

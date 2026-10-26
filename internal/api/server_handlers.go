@@ -2,10 +2,8 @@ package api
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -113,7 +111,7 @@ func (a *App) handleServerSettingsPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	msg, err := a.applyDoc(old, d)
+	msg, err := a.applyDoc(d)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -132,23 +130,30 @@ func (a *App) handleServerProxies(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	api := frp.AdminFromDoc(d)
-	ps, err := api.ServerProxies()
+	ps, err := frp.AdminFromDoc(d).ServerProxies()
 	if err != nil {
 		writeErr(w, 502, "无法连接 frps 管理接口（服务可能未运行）")
 		return
 	}
+	// Managed clients connect with user = client ID, so frps names their
+	// proxies "<client id>.<proxy name>".
 	names := map[string]string{}
-	for _, c := range api.ServerClients() {
-		names[c.ClientID] = c.Hostname
+	for _, c := range a.Fleet.List() {
+		names[c.ID] = c.Name
 	}
 	type row struct {
 		frp.ServerProxy
-		Hostname string `json:"hostname"`
+		ProxyName  string `json:"proxyName"`
+		ClientID   string `json:"managedClientId"`
+		ClientName string `json:"clientName"`
 	}
 	rows := make([]row, 0, len(ps))
 	for _, p := range ps {
-		rows = append(rows, row{p, names[p.ClientID]})
+		rw := row{ServerProxy: p, ProxyName: p.Name}
+		if id, rest, ok := strings.Cut(p.Name, "."); ok && names[id] != "" {
+			rw.ClientID, rw.ClientName, rw.ProxyName = id, names[id], rest
+		}
+		rows = append(rows, rw)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Status != rows[j].Status {
@@ -159,77 +164,5 @@ func (a *App) handleServerProxies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"proxies": rows})
 }
 
-func (a *App) handleServerClients(w http.ResponseWriter, r *http.Request) {
-	d, err := a.loadDoc()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	api := frp.AdminFromDoc(d)
-	cs := api.ServerClients()
-	counts := map[string]int{}
-	if ps, err := api.ServerProxies(); err == nil {
-		for _, p := range ps {
-			if p.Status == "online" {
-				counts[p.ClientID]++
-			}
-		}
-	}
-	type row struct {
-		frp.ServerClient
-		Proxies int `json:"proxies"`
-	}
-	rows := make([]row, 0, len(cs))
-	for _, c := range cs {
-		rows = append(rows, row{c, counts[c.ClientID]})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Online != rows[j].Online {
-			return rows[i].Online
-		}
-		return rows[i].LastConnectedAt > rows[j].LastConnectedAt
-	})
-	writeJSON(w, 200, map[string]any{"clients": rows})
-}
-
 // shellQuote wraps s in single quotes for a POSIX shell.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
-func (a *App) handleServerJoin(w http.ResponseWriter, r *http.Request) {
-	cfg := a.St.Get()
-	d, err := a.loadDoc()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	s := frp.ReadServer(d)
-	addr := cfg.PublicAddr
-	if addr == "" {
-		addr = r.Host
-		if h, _, err := net.SplitHostPort(r.Host); err == nil {
-			addr = h
-		}
-		addr = strings.Trim(addr, "[]")
-	}
-	script := cfg.InstallScriptURL
-	if script == "" {
-		script = DefaultInstallScriptURL
-	}
-	if cfg.GithubMirror != "" && strings.HasPrefix(script, "https://raw.githubusercontent.com/") {
-		script = strings.TrimRight(cfg.GithubMirror, "/") + "/" + script
-	}
-	cmd := "curl -fsSL " + shellQuote(script) + " | sudo bash -s -- client" +
-		" --server " + shellQuote(addr) +
-		" --port " + strconv.Itoa(s.BindPort) +
-		" --token " + shellQuote(s.Token)
-	if cfg.GithubMirror != "" {
-		cmd += " --mirror " + shellQuote(cfg.GithubMirror)
-	}
-	writeJSON(w, 200, map[string]any{
-		"command": cmd, "serverAddr": addr, "serverPort": s.BindPort, "token": s.Token,
-		"tlsForce": s.TLSForce, "publicAddrSet": cfg.PublicAddr != "",
-	})
-}
-
-// DefaultInstallScriptURL is overridden at build time with -ldflags.
-var DefaultInstallScriptURL = "https://raw.githubusercontent.com/wangmancang520/frp-panel/main/install.sh"

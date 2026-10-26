@@ -11,6 +11,8 @@ import (
 
 const (
 	RoleServer = "server"
+	// RoleClient was the standalone client panel of earlier versions; such
+	// machines are now managed by the server through an agent.
 	RoleClient = "client"
 
 	TLSSelfSigned = "selfsigned"
@@ -34,16 +36,17 @@ type Admin struct {
 }
 
 type Config struct {
-	Role             string    `json:"role"`
-	Listen           string    `json:"listen"`
-	FRPDir           string    `json:"frpDir"`
-	BinDir           string    `json:"binDir"`
-	ProcMode         string    `json:"procMode"` // systemd | exec
-	PublicAddr       string    `json:"publicAddr,omitempty"`
-	GithubMirror     string    `json:"githubMirror,omitempty"`
-	InstallScriptURL string    `json:"installScriptURL,omitempty"`
-	TLS              TLSConfig `json:"tls"`
-	Admin            Admin     `json:"admin"`
+	Role         string `json:"role"`
+	Listen       string `json:"listen"`
+	FRPDir       string `json:"frpDir"`
+	BinDir       string `json:"binDir"`
+	ProcMode     string `json:"procMode"` // systemd | exec
+	PublicAddr   string `json:"publicAddr,omitempty"`
+	GithubMirror string `json:"githubMirror,omitempty"`
+	// EnrollKey lets machines join as managed clients (see the join command).
+	EnrollKey string    `json:"enrollKey,omitempty"`
+	TLS       TLSConfig `json:"tls"`
+	Admin     Admin     `json:"admin"`
 }
 
 func (c Config) FRPConfigPath() string {

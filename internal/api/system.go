@@ -20,15 +20,11 @@ func (a *App) loadDoc() (frp.Doc, error) {
 	return frp.LoadDoc(a.St.Get().FRPConfigPath())
 }
 
-// applyDoc verifies and writes a new FRP config, then makes it effective:
-// frps always restarts; frpc hot-reloads unless connection settings changed.
-func (a *App) applyDoc(old, d frp.Doc) (string, error) {
+// applyDoc verifies and writes a new frps.toml, restarts frps and lets the
+// agents know, since their configs are rendered from it (port, token, TLS).
+func (a *App) applyDoc(d frp.Doc) (string, error) {
 	cfg := a.St.Get()
-	def := 7400
-	if cfg.Role == store.RoleServer {
-		def = 7500
-	}
-	frp.EnforceLocalAdmin(d, def, func() string { return randomSecret() })
+	frp.EnforceLocalAdmin(d, 7500, randomSecret)
 	b, err := d.Marshal()
 	if err != nil {
 		return "", err
@@ -40,13 +36,9 @@ func (a *App) applyDoc(old, d frp.Doc) (string, error) {
 	if err := store.WriteFileAtomic(path, b, 0o640); err != nil {
 		return "", err
 	}
+	a.Fleet.Notify()
 	if !a.Proc.Status().Running {
 		return "已保存。服务当前未运行，启动后生效。", nil
-	}
-	if cfg.Role == store.RoleClient && old != nil && !frp.CommonChanged(old, d) {
-		if err := frp.AdminFromDoc(d).Reload(); err == nil {
-			return "已保存并热重载", nil
-		}
 	}
 	if err := a.Proc.Restart(); err != nil {
 		return "", fmt.Errorf("已保存，但重启失败：%w", err)
@@ -60,28 +52,25 @@ func (a *App) handleSystem(w http.ResponseWriter, r *http.Request) {
 	cfg := a.St.Get()
 	host, _ := os.Hostname()
 	out := map[string]any{
-		"role":             cfg.Role,
-		"panelVersion":     a.Version,
-		"hostname":         host,
-		"os":               runtime.GOOS + "/" + runtime.GOARCH,
-		"frpVersion":       frp.InstalledVersion(cfg.FRPBinary()),
-		"service":          a.Proc.Status(),
-		"procMode":         cfg.ProcMode,
-		"panelUptime":      int(time.Since(a.started).Seconds()),
-		"listen":           cfg.Listen,
-		"githubMirror":     cfg.GithubMirror,
-		"publicAddr":       cfg.PublicAddr,
-		"installScriptURL": cfg.InstallScriptURL,
-		"configPath":       cfg.FRPConfigPath(),
-		"fingerprint":      "",
+		"role":         cfg.Role,
+		"panelVersion": a.Version,
+		"hostname":     host,
+		"os":           runtime.GOOS + "/" + runtime.GOARCH,
+		"frpVersion":   frp.InstalledVersion(cfg.FRPBinary()),
+		"service":      a.Proc.Status(),
+		"procMode":     cfg.ProcMode,
+		"panelUptime":  int(time.Since(a.started).Seconds()),
+		"listen":       cfg.Listen,
+		"githubMirror": cfg.GithubMirror,
+		"publicAddr":   cfg.PublicAddr,
+		"configPath":   cfg.FRPConfigPath(),
+		"fingerprint":  "",
 	}
 	if fp, err := tlsx.SelfSignedFingerprint(a.St.Dir + "/tls"); err == nil {
 		out["fingerprint"] = fp
 	}
-	if cfg.Role == store.RoleServer {
-		if d, err := a.loadDoc(); err == nil {
-			out["firewallPorts"] = frp.ServerPorts(d)
-		}
+	if d, err := a.loadDoc(); err == nil {
+		out["firewallPorts"] = frp.ServerPorts(d)
 	}
 	writeJSON(w, 200, out)
 }
@@ -147,15 +136,16 @@ func (a *App) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	cfg := a.St.Get()
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
-	name := "frpc"
-	if cfg.Role == store.RoleServer {
-		name = "frps"
-	}
 	wasRunning := a.Proc.Status().Running
-	if err := frp.Install(req.Version, cfg.GithubMirror, cfg.BinDir, name); err != nil {
+	// frpc is kept next to frps to verify client configs and to hand out to
+	// agents on the same CPU architecture.
+	if err := frp.Install(req.Version, cfg.GithubMirror, cfg.BinDir, "frps", "frpc"); err != nil {
 		writeErr(w, 502, err.Error())
 		return
 	}
+	// Agents follow the server's FRP version.
+	a.forgetFRPVersion()
+	a.Fleet.Notify()
 	if wasRunning {
 		if err := a.Proc.Restart(); err != nil {
 			writeErr(w, 500, "已安装，但重启失败："+err.Error())
@@ -167,19 +157,15 @@ func (a *App) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handlePanelSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		GithubMirror     string `json:"githubMirror"`
-		PublicAddr       string `json:"publicAddr"`
-		InstallScriptURL string `json:"installScriptURL"`
+		GithubMirror string `json:"githubMirror"`
+		PublicAddr   string `json:"publicAddr"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	for _, u := range []string{req.GithubMirror, req.InstallScriptURL} {
-		if u == "" {
-			continue
-		}
+	if u := req.GithubMirror; u != "" {
 		if p, err := url.Parse(u); err != nil || p.Scheme != "https" || p.Host == "" {
-			writeErr(w, 400, "地址必须以 https:// 开头")
+			writeErr(w, 400, "镜像地址必须以 https:// 开头")
 			return
 		}
 	}
@@ -190,12 +176,13 @@ func (a *App) handlePanelSettings(w http.ResponseWriter, r *http.Request) {
 	err := a.St.Update(func(c *store.Config) {
 		c.GithubMirror = strings.TrimSpace(req.GithubMirror)
 		c.PublicAddr = strings.TrimSpace(req.PublicAddr)
-		c.InstallScriptURL = strings.TrimSpace(req.InstallScriptURL)
 	})
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// The public address is the serverAddr in every client config.
+	a.Fleet.Notify()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -313,8 +300,7 @@ func (a *App) handleRawPut(w http.ResponseWriter, r *http.Request) {
 	}
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
-	old, _ := a.loadDoc()
-	msg, err := a.applyDoc(old, d)
+	msg, err := a.applyDoc(d)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

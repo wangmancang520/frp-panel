@@ -24,7 +24,11 @@ import (
 
 const repo = "fatedier/frp"
 
-var versionRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
+var (
+	versionRe      = regexp.MustCompile(`\d+\.\d+\.\d+`)
+	exactVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	platformRe     = regexp.MustCompile(`^[a-z]+_[a-z0-9_]+$`)
+)
 
 var httpClient = &http.Client{Timeout: 5 * time.Minute}
 
@@ -56,7 +60,8 @@ func ReleaseArch() string {
 	return arch
 }
 
-func withMirror(mirror, u string) string {
+// WithMirror prefixes u with a GitHub download mirror, if one is set.
+func WithMirror(mirror, u string) string {
 	mirror = strings.TrimSpace(mirror)
 	if mirror == "" {
 		return u
@@ -84,7 +89,7 @@ func LatestVersion(mirror string) (string, error) {
 	}
 	// Fallback: the /releases/latest page redirects to /releases/tag/vX.Y.Z.
 	c := &http.Client{Timeout: 15 * time.Second}
-	resp, err := c.Get(withMirror(mirror, "https://github.com/"+repo+"/releases/latest"))
+	resp, err := c.Get(WithMirror(mirror, "https://github.com/"+repo+"/releases/latest"))
 	if err != nil {
 		return "", err
 	}
@@ -99,7 +104,8 @@ func LatestVersion(mirror string) (string, error) {
 	return "", errors.New("无法获取 FRP 最新版本号")
 }
 
-func fetch(u string, w io.Writer, limit int64) error {
+// Fetch GETs u into w, reading at most limit bytes.
+func Fetch(u string, w io.Writer, limit int64) error {
 	resp, err := httpClient.Get(u)
 	if err != nil {
 		return err
@@ -112,58 +118,122 @@ func fetch(u string, w io.Writer, limit int64) error {
 	return err
 }
 
-// Install downloads FRP <version>, checks it against the release's published
-// SHA-256 list and atomically replaces the requested binaries in binDir.
-func Install(version, mirror, binDir string, names ...string) error {
-	version = strings.TrimPrefix(version, "v")
-	if !versionRe.MatchString(version) {
-		return fmt.Errorf("版本号无效：%q", version)
-	}
-	base := fmt.Sprintf("https://github.com/%s/releases/download/v%s/", repo, version)
-	pkg := fmt.Sprintf("frp_%s_%s_%s", version, runtime.GOOS, ReleaseArch())
-	file := pkg + ".tar.gz"
-
-	var sums strings.Builder
-	if err := fetch(withMirror(mirror, base+"frp_sha256_checksums.txt"), &sums, 1<<20); err != nil {
-		return fmt.Errorf("下载校验文件失败：%w", err)
-	}
-	want := ""
-	sc := bufio.NewScanner(strings.NewReader(sums.String()))
+// ChecksumFor returns the hex SHA-256 listed for file in a "sum  name" list.
+func ChecksumFor(sums, file string) string {
+	sc := bufio.NewScanner(strings.NewReader(sums))
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
-		if len(f) == 2 && f[1] == file {
-			want = strings.ToLower(f[0])
+		if len(f) == 2 && strings.TrimPrefix(f[1], "*") == file {
+			return strings.ToLower(f[0])
 		}
 	}
-	if want == "" {
-		return fmt.Errorf("发布的校验文件中没有 %s（可能不支持此架构）", file)
-	}
+	return ""
+}
 
-	tmp, err := os.CreateTemp("", "frp-*.tar.gz")
+// Archive returns the path of the FRP <version> release archive for platform
+// (e.g. "linux_amd64") in cacheDir, downloading it first if needed. The
+// download is checked against the release's published SHA-256 list.
+func Archive(version, mirror, platform, cacheDir string) (string, error) {
+	version = strings.TrimPrefix(version, "v")
+	if !exactVersionRe.MatchString(version) {
+		return "", fmt.Errorf("版本号无效：%q", version)
+	}
+	if !platformRe.MatchString(platform) {
+		return "", fmt.Errorf("平台无效：%q", platform)
+	}
+	file := fmt.Sprintf("frp_%s_%s.tar.gz", version, platform)
+	dst := filepath.Join(cacheDir, file)
+	if _, err := os.Stat(dst); err == nil {
+		return dst, nil
+	}
+	base := fmt.Sprintf("https://github.com/%s/releases/download/v%s/", repo, version)
+	var sums strings.Builder
+	if err := Fetch(WithMirror(mirror, base+"frp_sha256_checksums.txt"), &sums, 1<<20); err != nil {
+		return "", fmt.Errorf("下载校验文件失败：%w", err)
+	}
+	want := ChecksumFor(sums.String(), file)
+	if want == "" {
+		return "", fmt.Errorf("发布的校验文件中没有 %s（可能不支持此架构）", file)
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(cacheDir, ".dl-*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	h := sha256.New()
-	if err := fetch(withMirror(mirror, base+file), io.MultiWriter(tmp, h), 200<<20); err != nil {
-		return fmt.Errorf("下载 %s 失败：%w", file, err)
+	if err := Fetch(WithMirror(mirror, base+file), io.MultiWriter(tmp, h), 200<<20); err != nil {
+		return "", fmt.Errorf("下载 %s 失败：%w", file, err)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		return fmt.Errorf("%s 的 SHA-256 不匹配（实际 %s，应为 %s），已放弃安装", file, got, want)
+		return "", fmt.Errorf("%s 的 SHA-256 不匹配（实际 %s，应为 %s），已放弃", file, got, want)
 	}
-	if _, err := tmp.Seek(0, 0); err != nil {
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+// ExtractBinary copies the executable called name out of an FRP archive to
+// dst, replacing it atomically.
+func ExtractBinary(archive, name, dst string) error {
+	f, err := os.Open(archive)
+	if err != nil {
 		return err
 	}
-
-	gz, err := gzip.NewReader(tmp)
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return err
 	}
 	tr := tar.NewReader(gz)
-	wanted := map[string]bool{}
-	for _, n := range names {
-		wanted[n] = true
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return fmt.Errorf("压缩包 %s 中没有 %s", filepath.Base(archive), name)
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Typeflag != tar.TypeReg || path.Base(hdr.Name) != name {
+			continue
+		}
+		out, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+"-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(out.Name())
+		if _, err := io.Copy(out, io.LimitReader(tr, 200<<20)); err != nil {
+			out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(out.Name(), 0o755); err != nil {
+			return err
+		}
+		return os.Rename(out.Name(), dst)
+	}
+}
+
+// Install downloads FRP <version> for this machine and atomically replaces
+// the requested binaries in binDir.
+func Install(version, mirror, binDir string, names ...string) error {
+	tmp, err := os.MkdirTemp("", "frp-dl-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	archive, err := Archive(version, mirror, runtime.GOOS+"_"+ReleaseArch(), tmp)
+	if err != nil {
+		return err
 	}
 	staged := map[string]string{}
 	defer func() {
@@ -171,37 +241,14 @@ func Install(version, mirror, binDir string, names ...string) error {
 			os.Remove(p)
 		}
 	}()
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		name := path.Base(hdr.Name)
-		if hdr.Typeflag != tar.TypeReg || !wanted[name] {
-			continue
-		}
-		dst := filepath.Join(binDir, "."+name+".new")
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(f, io.LimitReader(tr, 200<<20)); err != nil {
-			f.Close()
-			return err
-		}
-		f.Close()
-		staged[name] = dst
-	}
 	for _, n := range names {
-		if staged[n] == "" {
-			return fmt.Errorf("压缩包 %[2]s 中没有 %[1]s", n, file)
+		dst := filepath.Join(binDir, "."+n+".new")
+		if err := ExtractBinary(archive, n, dst); err != nil {
+			return err
 		}
-		// Sanity check before swapping it in.
-		if out, err := exec.Command(staged[n], "-v").CombinedOutput(); err != nil {
-			return fmt.Errorf("下载的 %s 无法运行：%v %s", n, err, out)
+		staged[n] = dst
+		if err := CheckRuns(dst); err != nil {
+			return err
 		}
 	}
 	for _, n := range names {
@@ -209,6 +256,14 @@ func Install(version, mirror, binDir string, names ...string) error {
 			return err
 		}
 		delete(staged, n)
+	}
+	return nil
+}
+
+// CheckRuns makes sure a freshly downloaded binary executes ("-v").
+func CheckRuns(bin string) error {
+	if out, err := exec.Command(bin, "-v").CombinedOutput(); err != nil {
+		return fmt.Errorf("下载的 %s 无法运行：%v %s", filepath.Base(bin), err, out)
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
-// Pages shared by server and client panels: logs, raw config, system, security.
+// Shared pages: logs, raw config (frps or a managed client), system, security.
 import {
   html, useState, useEffect, useRef, useMemo, api, usePoll, useAction, toast, icon,
   Field, TextInput, SecretInput, Seg, Alert, CodeBox, ServiceBadge, Spinner,
@@ -30,11 +30,13 @@ function lineClass(l) {
   return '';
 }
 
-export function LogsPage() {
+// LogsPage shows frps logs, or a managed client's when path is given (those
+// come from the agent, which sends its last 300 lines).
+export function LogsPage({ path }) {
   const [auto, setAuto] = useState(true);
   const [filter, setFilter] = useState('');
   const [n, setN] = useState(300);
-  const { data, error, reload } = usePoll(() => api('GET', '/logs?n=' + n), auto ? 3000 : 0, [auto, n]);
+  const { data, error, reload } = usePoll(() => api('GET', path || '/logs?n=' + n), auto ? 3000 : 0, [auto, n, path]);
   const box = useRef();
   const stick = useRef(true);
   const lines = useMemo(() => {
@@ -48,7 +50,7 @@ export function LogsPage() {
   return html`<div class="card">
     <div class="card-head">
       <input class="input" style="max-width:280px" placeholder="过滤日志…" value=${filter} onInput=${e => setFilter(e.target.value)} />
-      <${Seg} value=${n} onChange=${setN} options=${[{ value: 300, label: '300 行' }, { value: 1000, label: '1000 行' }]} />
+      ${!path && html`<${Seg} value=${n} onChange=${setN} options=${[{ value: 300, label: '300 行' }, { value: 1000, label: '1000 行' }]} />`}
       <div class="grow"></div>
       <label class="check mb0"><input type="checkbox" checked=${auto} onChange=${e => setAuto(e.target.checked)} /><span>自动刷新</span></label>
       <button class="btn sm" onClick=${reload}>${icon('refresh')}刷新</button>
@@ -61,22 +63,22 @@ export function LogsPage() {
 }
 
 // ---------- raw config ----------
-export function RawPage({ role }) {
+export function RawPage({ path = '/raw', title = 'frps.toml', note }) {
   const [content, setContent] = useState(null);
-  const [path, setPath] = useState('');
+  const [file, setFile] = useState('');
   const [err, setErr] = useState('');
   const [busy, run] = useAction();
   const load = async () => {
-    const r = await api('GET', '/raw');
+    const r = await api('GET', path);
     setContent(r.content);
-    setPath(r.path);
+    setFile(r.path);
     setErr('');
   };
-  useEffect(() => { load().catch(e => setErr(e.message)); }, []);
+  useEffect(() => { load().catch(e => setErr(e.message)); }, [path]);
   const save = () => run(async () => {
     setErr('');
     try {
-      const r = await api('PUT', '/raw', { content });
+      const r = await api('PUT', path, { content });
       await load();
       return r;
     } catch (e) { setErr(e.message); throw e; }
@@ -84,12 +86,12 @@ export function RawPage({ role }) {
   if (content === null) return html`<div class="card">${err ? html`<${Alert} kind="err">${err}<//>` : html`<${Spinner} />`}</div>`;
   return html`<div class="card">
     <div class="card-head">
-      <div><h2>${role === 'server' ? 'frps.toml' : 'frpc.toml'}</h2><div class="muted small mono">${path}</div></div>
+      <div><h2>${title}</h2><div class="muted small mono">${file}</div></div>
       <div class="grow"></div>
       <button class="btn sm" onClick=${() => load()}>${icon('refresh')}重新载入</button>
       <button class="btn primary sm" disabled=${busy} onClick=${save}>${icon(busy ? 'loader' : 'check', busy ? 'spin' : '')}校验并保存</button>
     </div>
-    <${Alert}>保存前会用 <code>${role === 'server' ? 'frps' : 'frpc'} verify</code> 校验配置，校验失败不会写入。为了安全，<code>webServer.addr</code> 会被强制设为 127.0.0.1。注释不会保留。<//>
+    <${Alert}>${note || html`保存前会用 <code>frps verify</code> 校验配置，校验失败不会写入。为了安全，<code>webServer.addr</code> 会被强制设为 127.0.0.1。注释不会保留。`}<//>
     ${err && html`<${Alert} kind="err"><pre class="mono mb0" style="white-space:pre-wrap;margin:0">${err}</pre><//>`}
     <textarea class="input" rows="28" spellcheck="false" value=${content} onInput=${e => setContent(e.target.value)}></textarea>
   </div>`;
@@ -102,14 +104,14 @@ export function SystemPage({ role }) {
   const [busy, run] = useAction();
   const [form, setForm] = useState(null);
   useEffect(() => {
-    if (sys.data && !form) setForm({ githubMirror: sys.data.githubMirror || '', publicAddr: sys.data.publicAddr || '', installScriptURL: sys.data.installScriptURL || '' });
+    if (sys.data && !form) setForm({ githubMirror: sys.data.githubMirror || '', publicAddr: sys.data.publicAddr || '' });
   }, [sys.data]);
   const s = sys.data;
   if (!s) return html`<div class="card">${sys.error ? html`<${Alert} kind="err">${sys.error.message}<//>` : html`<${Spinner} />`}</div>`;
   const name = role === 'server' ? 'frps' : 'frpc';
   const check = () => run(async () => setLatest(await api('GET', '/frp/latest')));
   const upgrade = () => run(async () => {
-    if (!confirm(`将 ${name} 升级到 v${latest.latest}？服务会自动重启。`)) return;
+    if (!confirm(`将 FRP 升级到 v${latest.latest}？frps 会重启，受管客户端随后会自动升级 frpc。`)) return;
     await api('POST', '/frp/upgrade', { version: latest.latest });
     setLatest(await api('GET', '/frp/latest'));
     sys.reload();
@@ -140,21 +142,19 @@ export function SystemPage({ role }) {
       ${latest && latest.latest === latest.installed && html`<div class="mt"><span class="badge ok">${icon('check')}已是最新</span></div>`}
     </div>
     <div class="card">
-      <h2>面板设置</h2><p class="desc">影响下载、客户端接入命令等。</p>
+      <h2>面板设置</h2><p class="desc">影响下载、客户端接入命令和客户端连接的服务器地址。</p>
       ${form && html`<div>
         <${Field} label="GitHub 下载镜像" help="国内服务器访问 GitHub 慢时填写，如 https://ghfast.top/ ，留空则直连。">
           <${TextInput} value=${form.githubMirror} onInput=${set('githubMirror')} placeholder="https://ghfast.top/" /><//>
-        ${role === 'server' && html`<${Field} label="公网地址" help="生成客户端接入命令时使用的 IP 或域名；留空则使用当前浏览器访问的地址。">
+        <${Field} label="公网地址" help="客户端连接 frps 和面板时使用的 IP 或域名；留空则使用客户端访问面板时的地址。修改后所有客户端会自动更新。">
           <${TextInput} value=${form.publicAddr} onInput=${set('publicAddr')} placeholder="1.2.3.4 或 frp.example.com" /><//>
-        <${Field} label="安装脚本地址" help="接入命令里下载 install.sh 的 URL，自己 fork 项目后修改。">
-          <${TextInput} value=${form.installScriptURL} onInput=${set('installScriptURL')} placeholder="https://raw.githubusercontent.com/…/install.sh" /><//>`}
         <button class="btn primary" disabled=${busy} onClick=${savePanel}>保存</button>
       </div>`}
     </div>
     <div class="card">
       <h2>系统信息</h2><p class="desc">FRP Panel v${s.panelVersion}</p>
       <dl class="kv">
-        <dt>角色</dt><dd>${role === 'server' ? '服务端（frps）' : '客户端（frpc）'}</dd>
+        <dt>角色</dt><dd>服务端（frps）</dd>
         <dt>主机名</dt><dd>${s.hostname}</dd>
         <dt>系统</dt><dd>${s.os}</dd>
         <dt>面板监听</dt><dd class="mono">${s.listen}（仅 HTTPS）</dd>

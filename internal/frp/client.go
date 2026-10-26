@@ -39,16 +39,27 @@ func ApplyClientCommon(d Doc, c ClientCommon) error {
 	if !validPort(c.ServerPort, false) {
 		return fmt.Errorf("服务器端口无效：%d", c.ServerPort)
 	}
-	switch c.Protocol {
-	case "", "tcp", "kcp", "quic", "websocket", "wss":
-	default:
-		return fmt.Errorf("不支持的传输协议：%q", c.Protocol)
+	if err := ApplyClientOptions(d, c); err != nil {
+		return err
 	}
 	set(d, "serverAddr", c.ServerAddr)
 	set(d, "serverPort", int64(c.ServerPort))
 	set(d, "auth.method", "token")
 	set(d, "auth.token", strings.TrimSpace(c.Token))
 	setOrDel(d, "user", strings.TrimSpace(c.User))
+	// Keep retrying instead of exiting when the server is briefly unreachable.
+	set(d, "loginFailExit", false)
+	return nil
+}
+
+// ApplyClientOptions writes the transport and log settings of c, i.e. the
+// part of the connection that a managed client may still tune per machine.
+func ApplyClientOptions(d Doc, c ClientCommon) error {
+	switch c.Protocol {
+	case "", "tcp", "kcp", "quic", "websocket", "wss":
+	default:
+		return fmt.Errorf("不支持的传输协议：%q", c.Protocol)
+	}
 	if c.Protocol == "tcp" {
 		c.Protocol = ""
 	}
@@ -60,25 +71,28 @@ func ApplyClientCommon(d Doc, c ClientCommon) error {
 	}
 	setOrDel(d, "log.level", c.LogLevel)
 	setOrDel(d, "log.maxDays", c.LogMaxDays)
-	// Keep retrying instead of exiting when the server is briefly unreachable.
-	set(d, "loginFailExit", false)
 	return nil
 }
 
-func NewClientDoc(c ClientCommon, genSecret func() string) (Doc, error) {
+// managedKeys are filled in by the server for every managed client, so they
+// are never stored in (or taken from) a client's own config.
+var managedKeys = []string{"serverAddr", "serverPort", "auth", "user", "loginFailExit"}
+
+// NewManagedDoc is the starting config of a server-managed client; the
+// connection keys are added when the server renders it.
+func NewManagedDoc(genSecret func() string) Doc {
 	d := Doc{}
-	if c.LogLevel == "" {
-		c.LogLevel = "info"
-	}
-	if c.LogMaxDays == 0 {
-		c.LogMaxDays = 7
-	}
-	c.TLSEnable = true
-	if err := ApplyClientCommon(d, c); err != nil {
-		return nil, err
-	}
+	set(d, "log.level", "info")
+	set(d, "log.maxDays", int64(7))
 	EnforceLocalAdmin(d, 7400, genSecret)
-	return d, nil
+	return d
+}
+
+// StripManaged removes the keys the server controls from a client config.
+func StripManaged(d Doc) {
+	for _, k := range managedKeys {
+		delete(d, k)
+	}
 }
 
 // Proxy is one [[proxies]] entry as edited in the UI.
@@ -300,4 +314,18 @@ func CommonChanged(a, b Doc) bool {
 		return string(out)
 	}
 	return strip(a) != strip(b)
+}
+
+// RemotePorts maps "tcp/6000"-style keys to the names of the enabled proxies
+// in d that claim that public port on the server.
+func RemotePorts(d Doc) map[string]string {
+	out := map[string]string{}
+	for _, m := range Proxies(d) {
+		p := ReadProxy(m)
+		if p.Disabled || p.RemotePort == 0 || (p.Type != "tcp" && p.Type != "udp") {
+			continue
+		}
+		out[fmt.Sprintf("%s/%d", p.Type, p.RemotePort)] = p.Name
+	}
+	return out
 }

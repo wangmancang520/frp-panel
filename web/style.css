@@ -236,7 +236,7 @@ th { font-size: 12px; font-weight: 600; color: var(--text-3); background: var(--
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
 .empty { text-align: center; padding: 40px 20px; color: var(--text-3); }
-.empty svg { width: 40px; height: 40px; opacity: .5; margin-bottom: 8px; }
+.empty > svg { width: 40px; height: 40px; opacity: .5; margin-bottom: 8px; }
 
 /* ---------- proxy cards ---------- */
 .pcard { display: flex; flex-direction: column; gap: 12px; padding: 18px; }
@@ -340,3 +340,6 @@ details.adv summary { cursor: pointer; color: var(--text-2); font-weight: 550; m
 .small { font-size: 12.5px; }
 .mt { margin-top: 16px; }
 .mb0 { margin-bottom: 0; }
+tr.click { cursor: pointer; }
+td a { color: var(--accent); text-decoration: none; }
+td a:hover { text-decoration: underline; }

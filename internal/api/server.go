@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"frp-panel/internal/auth"
+	"frp-panel/internal/fleet"
 	"frp-panel/internal/frp"
 	"frp-panel/internal/store"
 	"frp-panel/internal/tlsx"
@@ -29,12 +30,20 @@ type App struct {
 	TLS     *tlsx.Manager
 	Proc    frp.Manager
 	Web     fs.FS
+	Fleet   *fleet.Registry
+	// InstallScript is served at /join.sh for the client join command.
+	InstallScript []byte
 
 	sess    *auth.Sessions
 	lim     *auth.Limiter
 	cfgMu   sync.Mutex // serializes FRP config writes
 	hist    *history
 	started time.Time
+	dlMu    sync.Mutex // serializes agent binary downloads into the cache
+
+	verMu sync.Mutex
+	ver   string
+	verAt time.Time
 
 	acmeOnce sync.Once
 }
@@ -42,10 +51,8 @@ type App struct {
 func (a *App) Serve(ctx context.Context) error {
 	a.sess, a.lim, a.started = auth.NewSessions(), auth.NewLimiter(), time.Now()
 	cfg := a.St.Get()
-	if cfg.Role == store.RoleServer {
-		a.hist = newHistory(360)
-		go a.sample(ctx)
-	}
+	a.hist = newHistory(360)
+	go a.sample(ctx)
 	if cfg.TLS.Mode == store.TLSACME {
 		a.startACMEHTTP()
 	}
@@ -140,23 +147,36 @@ func (a *App) routes() http.Handler {
 	authed("GET /api/raw", a.handleRawGet)
 	authed("PUT /api/raw", a.handleRawPut)
 
-	authed("GET /api/server/overview", a.serverOnly(a.handleServerOverview))
-	authed("GET /api/server/settings", a.serverOnly(a.handleServerSettingsGet))
-	authed("PUT /api/server/settings", a.serverOnly(a.handleServerSettingsPut))
-	authed("GET /api/server/proxies", a.serverOnly(a.handleServerProxies))
-	authed("GET /api/server/clients", a.serverOnly(a.handleServerClients))
-	authed("GET /api/server/join", a.serverOnly(a.handleServerJoin))
+	authed("GET /api/server/overview", a.handleServerOverview)
+	authed("GET /api/server/settings", a.handleServerSettingsGet)
+	authed("PUT /api/server/settings", a.handleServerSettingsPut)
+	authed("GET /api/server/proxies", a.handleServerProxies)
+	authed("GET /api/server/join", a.handleServerJoin)
+	authed("POST /api/server/join/reset", a.handleServerJoinReset)
 
-	authed("GET /api/client/overview", a.clientOnly(a.handleClientOverview))
-	authed("GET /api/client/common", a.clientOnly(a.handleClientCommonGet))
-	authed("PUT /api/client/common", a.clientOnly(a.handleClientCommonPut))
-	authed("GET /api/client/proxies", a.clientOnly(a.handleClientProxies))
-	authed("POST /api/client/proxies", a.clientOnly(a.handleClientProxyCreate))
-	authed("PUT /api/client/proxies/{name}", a.clientOnly(a.handleClientProxyUpdate))
-	authed("DELETE /api/client/proxies/{name}", a.clientOnly(a.handleClientProxyDelete))
-	authed("POST /api/client/test", a.clientOnly(a.handleClientTest))
+	// Managed clients.
+	authed("GET /api/clients", a.handleClients)
+	authed("GET /api/clients/{id}", a.handleClientGet)
+	authed("PUT /api/clients/{id}", a.handleClientPut)
+	authed("DELETE /api/clients/{id}", a.handleClientDelete)
+	authed("POST /api/clients/{id}/restart", a.handleClientRestart)
+	authed("GET /api/clients/{id}/proxies", a.handleClientProxies)
+	authed("POST /api/clients/{id}/proxies", a.handleClientProxyCreate)
+	authed("PUT /api/clients/{id}/proxies/{name}", a.handleClientProxyUpdate)
+	authed("DELETE /api/clients/{id}/proxies/{name}", a.handleClientProxyDelete)
+	authed("GET /api/clients/{id}/logs", a.handleClientLogs)
+	authed("GET /api/clients/{id}/raw", a.handleClientRawGet)
+	authed("PUT /api/clients/{id}/raw", a.handleClientRawPut)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, 404, "接口不存在") })
+
+	// Agents on client machines (token auth, no cookies) and their installer.
+	mux.HandleFunc("GET /join.sh", a.handleJoinScript)
+	mux.HandleFunc("POST /agent/v1/enroll", a.handleAgentEnroll)
+	mux.HandleFunc("GET /agent/v1/config", a.agentAuth(a.handleAgentConfig))
+	mux.HandleFunc("POST /agent/v1/report", a.agentAuth(a.handleAgentReport))
+	mux.HandleFunc("GET /agent/v1/download/{name}", a.handleAgentDownload)
+	mux.HandleFunc("/agent/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, 404, "接口不存在") })
 	files := http.FileServerFS(a.Web)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -178,6 +198,10 @@ func (a *App) secure(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if strings.HasPrefix(r.URL.Path, "/agent/") {
+			h.Set("Cache-Control", "no-store")
+			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			h.Set("Cache-Control", "no-store")
 			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
@@ -229,26 +253,6 @@ func (a *App) requireAuth(next http.HandlerFunc) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, c.Value)))
 	})
-}
-
-func (a *App) serverOnly(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if a.St.Get().Role != store.RoleServer {
-			writeErr(w, 404, "仅服务端面板可用")
-			return
-		}
-		h(w, r)
-	}
-}
-
-func (a *App) clientOnly(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if a.St.Get().Role != store.RoleClient {
-			writeErr(w, 404, "仅客户端面板可用")
-			return
-		}
-		h(w, r)
-	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

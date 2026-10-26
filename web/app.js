@@ -1,20 +1,15 @@
 // App shell: session check, login, navigation, theme.
 import { html, render, useState, useEffect, api, setUnauthorizedHandler, Toasts, icon, Alert, Spinner } from './lib.js';
 import { LogsPage, RawPage, SystemPage, SecurityPage, PasswordForm } from './pages-common.js';
-import { ServerDashboard, ServerProxies, ServerClients, ServerSettings } from './pages-server.js';
-import { ClientDashboard, ClientProxies, ClientConnection } from './pages-client.js';
+import { ServerDashboard, ServerProxies, ServerSettings } from './pages-server.js';
+import { ClientsPage } from './pages-clients.js';
 
 const NAV = {
   server: [
     { id: 'dashboard', label: '概览', icon: 'dashboard', page: ServerDashboard },
-    { id: 'proxies', label: '代理', icon: 'proxies', page: ServerProxies },
-    { id: 'clients', label: '客户端', icon: 'clients', page: ServerClients },
+    { id: 'clients', label: '客户端', icon: 'clients', page: ClientsPage },
+    { id: 'proxies', label: '在线代理', icon: 'proxies', page: ServerProxies },
     { id: 'settings', label: '服务端设置', icon: 'settings', page: ServerSettings },
-  ],
-  client: [
-    { id: 'dashboard', label: '概览', icon: 'dashboard', page: ClientDashboard },
-    { id: 'proxies', label: '代理', icon: 'proxies', page: ClientProxies },
-    { id: 'connection', label: '连接设置', icon: 'link', page: ClientConnection },
   ],
   common: [
     { id: 'logs', label: '日志', icon: 'logs', page: LogsPage },
@@ -25,8 +20,8 @@ const NAV = {
 };
 
 const SUBTITLE = {
-  dashboard: '运行状态一览', proxies: '端口与域名映射', clients: '已连接的 frpc', settings: 'frps.toml 常用参数',
-  connection: '如何连接到 frps', logs: '实时运行日志', raw: '直接编辑 TOML 配置', system: '服务控制与版本管理', security: '账号与 HTTPS 证书',
+  dashboard: '运行状态一览', proxies: 'frps 上正在运行的代理', clients: '集中管理所有内网机器及其代理', settings: 'frps.toml 常用参数',
+  logs: 'frps 实时运行日志', raw: '直接编辑 frps.toml', system: '服务控制与版本管理', security: '账号与 HTTPS 证书',
 };
 
 // ---------- theme ----------
@@ -93,16 +88,19 @@ function Shell({ me, onLogout }) {
     window.addEventListener('hashchange', h);
     return () => window.removeEventListener('hashchange', h);
   }, []);
-  const items = [...NAV[me.role], ...NAV.common];
-  const cur = items.find(i => i.id === route) || items[0];
+  const items = [...NAV.server, ...NAV.common];
+  // Routes may carry a sub-path, e.g. #/clients/<id>.
+  const [top, ...rest] = route.split('/');
+  const cur = items.find(i => i.id === top) || items[0];
+  const sub = cur.id === top ? rest.join('/') : '';
   const go = id => { location.hash = '#/' + id; };
   const logout = async () => { try { await api('POST', '/logout'); } catch { /* ignore */ } onLogout(); };
   const navItem = i => html`<a class="nav-item ${i.id === cur.id ? 'active' : ''}" href=${'#/' + i.id}>${icon(i.icon)}<span>${i.label}</span></a>`;
   const Page = cur.page;
   return html`<div class="shell">
     <aside class="side">
-      <div class="brand"><img src="favicon.svg" alt="" /><div><b>FRP Panel</b><small>${me.role === 'server' ? '服务端 · frps' : '客户端 · frpc'}</small></div></div>
-      ${NAV[me.role].map(navItem)}
+      <div class="brand"><img src="favicon.svg" alt="" /><div><b>FRP Panel</b><small>服务端 · 集中管理</small></div></div>
+      ${NAV.server.map(navItem)}
       <div class="nav-sep"></div>
       ${NAV.common.map(navItem)}
       <div class="side-foot"><${ThemeButton} /><div class="spacer"></div>
@@ -111,7 +109,7 @@ function Shell({ me, onLogout }) {
     <main class="main">
       <nav class="mobile-nav">${items.map(navItem)}<${ThemeButton} /><button class="btn ghost icon" onClick=${logout}>${icon('logout')}</button></nav>
       <div class="topbar"><div><h1>${cur.label}</h1><div class="sub">${SUBTITLE[cur.id]}</div></div></div>
-      <div class="content"><${Page} key=${cur.id} role=${me.role} me=${me} go=${go} /></div>
+      <div class="content"><${Page} key=${cur.id} sub=${sub} role="server" me=${me} go=${go} /></div>
     </main>
   </div>`;
 }

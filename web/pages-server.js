@@ -5,6 +5,7 @@ import {
   fmtBytes, fmtRate, since, fmtTime,
 } from './lib.js';
 import { ServiceControl } from './pages-common.js';
+import { JoinCard } from './pages-clients.js';
 
 // ---------- traffic chart (hand-drawn SVG) ----------
 function TrafficChart({ history }) {
@@ -62,7 +63,6 @@ function TrafficChart({ history }) {
 // ---------- dashboard ----------
 export function ServerDashboard({ go }) {
   const ov = usePoll(() => api('GET', '/server/overview'), 5000);
-  const join = usePoll(() => api('GET', '/server/join'));
   const sys = usePoll(() => api('GET', '/system'));
   const d = ov.data;
   if (!d) return html`<div class="card">${ov.error ? html`<${Alert} kind="err">${ov.error.message}<//>` : html`<${Spinner} />`}</div>`;
@@ -90,15 +90,7 @@ export function ServerDashboard({ go }) {
       <${TrafficChart} history=${d.history} />
     </div>
     <div class="grid two mt">
-      <div class="card">
-        <h2>添加客户端</h2>
-        <p class="desc">在内网机器（Ubuntu/Debian）上以 root 运行下面的命令，即可自动安装 frpc 并连接到本服务器。</p>
-        ${join.data ? html`<div>
-          ${!join.data.publicAddrSet && html`<${Alert} kind="warn">服务器地址取自当前浏览器访问的地址（${join.data.serverAddr}）。如果它不是公网地址，请到「系统」页设置公网地址。<//>`}
-          <${CodeBox} text=${join.data.command} />
-          <div class="muted small mt">命令中包含连接令牌，请勿公开分享。</div>
-        </div>` : html`<${Spinner} />`}
-      </div>
+      <${JoinCard} go=${go} />
       <div class="card">
         <h2>需要放行的端口</h2>
         <p class="desc">请同时在系统防火墙和云服务商的<b>安全组</b>中放行以下端口。安装脚本已尝试自动配置 ufw / firewalld。</p>
@@ -127,36 +119,18 @@ export function ServerProxies() {
     <div class="card-head"><h2>代理列表</h2><div class="grow"></div>
       <${Seg} value=${type} onChange=${setType} options=${types.map(t => ({ value: t, label: t === 'all' ? '全部' : t.toUpperCase() }))} /></div>
     ${error && html`<${Alert} kind="err">${error.message}<//>`}
-    ${!data && !error ? html`<${Spinner} />` : list.length === 0 ? html`<${Empty} text="还没有客户端注册代理" />` : html`<div class="table-wrap"><table>
+    ${!data && !error ? html`<${Spinner} />` : list.length === 0 ? html`<${Empty} text="还没有在线的代理。到「客户端」页为客户端添加代理。" />` : html`<div class="table-wrap"><table>
       <thead><tr><th>名称</th><th>类型</th><th>公网入口</th><th>客户端</th><th>状态</th><th class="num">连接</th><th class="num">今日入</th><th class="num">今日出</th><th>上线时间</th></tr></thead>
       <tbody>${list.map(p => html`<tr key=${p.type + p.name}>
-        <td><b>${p.name}</b></td>
+        <td><b>${p.proxyName || p.name}</b></td>
         <td><span class="badge type">${p.type}</span></td>
         <td class="mono">${target(p)}</td>
-        <td>${p.hostname || html`<span class="muted mono">${(p.clientID || '').slice(0, 8)}</span>`}</td>
+        <td>${p.managedClientId ? html`<a href=${'#/clients/' + p.managedClientId}>${p.clientName}</a>` : html`<span class="muted" title="不是由本面板管理的 frpc">未受管 · ${p.name.split('.')[0]}</span>`}</td>
         <td>${p.status === 'online' ? html`<span class="badge ok"><span class="dot ok"></span>在线</span>` : html`<span class="badge"><span class="dot"></span>离线</span>`}</td>
         <td class="num">${p.curConns}</td>
         <td class="num">${fmtBytes(p.todayTrafficIn)}</td>
         <td class="num">${fmtBytes(p.todayTrafficOut)}</td>
         <td class="muted">${p.lastStartTime || '-'}</td>
-      </tr>`)}</tbody></table></div>`}
-  </div>`;
-}
-
-// ---------- clients ----------
-export function ServerClients() {
-  const { data, error } = usePoll(() => api('GET', '/server/clients'), 5000);
-  const list = (data && data.clients) || [];
-  return html`<div class="card">
-    <div class="card-head"><h2>客户端</h2><span class="muted small">${list.filter(c => c.online).length} 在线 / ${list.length} 个</span></div>
-    ${error && html`<${Alert} kind="err">${error.message}<//>`}
-    ${!data && !error ? html`<${Spinner} />` : list.length === 0 ? html`<${Empty} text="还没有客户端连接过。到「概览」页复制接入命令开始添加。" />` : html`<div class="table-wrap"><table>
-      <thead><tr><th>主机名</th><th>状态</th><th>IP</th><th>版本</th><th>用户</th><th class="num">代理</th><th>首次连接</th><th>最近连接</th></tr></thead>
-      <tbody>${list.map(c => html`<tr key=${c.clientID}>
-        <td><b>${c.hostname || '-'}</b><div class="muted mono small">${c.clientID.slice(0, 12)}</div></td>
-        <td>${c.online ? html`<span class="badge ok"><span class="dot ok"></span>在线</span>` : html`<span class="badge"><span class="dot"></span>离线</span>`}</td>
-        <td class="mono">${c.clientIP}</td><td>v${c.version}</td><td>${c.user || '-'}</td><td class="num">${c.proxies}</td>
-        <td class="muted">${fmtTime(c.firstConnectedAt)}</td><td class="muted">${fmtTime(c.lastConnectedAt)}</td>
       </tr>`)}</tbody></table></div>`}
   </div>`;
 }
@@ -189,7 +163,7 @@ export function ServerSettings() {
           <${Field} label="监听端口（bindPort）" help="frpc 连接的端口，默认 7000"><${NumInput} value=${s.bindPort} onInput=${set('bindPort')} /><//>
           <${Field} label="监听地址" help="留空表示 0.0.0.0"><${TextInput} value=${s.bindAddr} onInput=${set('bindAddr')} placeholder="0.0.0.0" /><//>
         </div>
-        <${Field} label="认证令牌（token）" help="修改后，所有客户端都要同步修改，否则会无法连接。">
+        <${Field} label="认证令牌（token）" help="修改后会自动下发给所有受管客户端（离线的客户端上线时更新）。">
           <${SecretInput} value=${s.token} onInput=${set('token')} generate=${32} /><//>
         <${Check} checked=${s.tlsForce} onChange=${set('tlsForce')} label="强制 TLS 加密" hint="拒绝未启用 TLS 的客户端（frpc 默认已启用 TLS），建议保持开启。" />
       </div>
