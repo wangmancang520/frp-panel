@@ -328,7 +328,8 @@ func (a *App) agentFRPC(arch string) (string, error) {
 var releaseVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 // agentPanel returns an frp-panel binary for arch: this very executable when
-// the CPU matches, otherwise the same version from the GitHub release.
+// the CPU matches, otherwise the same version from the cache (which the
+// installer seeds from a local dist/ build) or from the GitHub release.
 func (a *App) agentPanel(arch string) (string, error) {
 	if arch == frp.ReleaseArch() {
 		exe, err := os.Executable()
@@ -341,15 +342,15 @@ func (a *App) agentPanel(arch string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("没有适用于 %s 的 frp-panel 发布版本", arch)
 	}
-	if !releaseVersionRe.MatchString(a.Version) {
-		return "", fmt.Errorf("面板是开发版本（%s），无法为其他架构（%s）提供程序；请使用正式发布版本", a.Version, arch)
-	}
 	a.dlMu.Lock()
 	defer a.dlMu.Unlock()
 	file := "frp-panel-linux-" + name
 	bin := filepath.Join(a.cacheDir(), file+"-"+a.Version)
 	if _, err := os.Stat(bin); err == nil {
 		return bin, nil
+	}
+	if !releaseVersionRe.MatchString(a.Version) {
+		return "", fmt.Errorf("面板是开发版本（%s），没有适用于 %s 的程序；请用 build.sh 编译全部架构并通过本地 dist 目录更新服务端，或使用正式发布版本", a.Version, arch)
 	}
 	mirror := a.St.Get().GithubMirror
 	base := fmt.Sprintf("https://github.com/%s/releases/download/v%s/", PanelRepo, a.Version)

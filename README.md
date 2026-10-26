@@ -38,16 +38,41 @@ curl -fsSLk --pinnedpubkey 'sha256//...' 'https://1.2.3.4:7600/join.sh' | sudo b
 
 接入后，客户端会出现在服务端面板的「客户端」页。点进去就能添加代理、修改传输设置、查看日志、重启 frpc，客户端上不需要做任何操作。
 
-### 管理命令
+### 管理：frp-panel-ctl
+
+安装后，服务端和客户端上都有 `frp-panel-ctl`。不带参数运行会打开交互菜单，菜单内容按本机角色变化：
 
 ```bash
-sudo bash install.sh status            # 查看状态、面板地址、证书指纹、接入命令
-sudo bash install.sh upgrade           # 服务端：升级 FRP 和面板（客户端随后自动升级）
-sudo bash install.sh reset-password    # 服务端：忘记密码时重置
-sudo bash install.sh uninstall --purge # 卸载（--purge 同时删除配置）
+sudo frp-panel-ctl
 ```
 
-客户端上没有 install.sh 文件时，可以用 `curl -fsSLk --pinnedpubkey '<pin>' https://<服务端>:7600/join.sh | sudo bash -s -- uninstall` 卸载。
+| 菜单项 / 命令 | 服务端 | 客户端 |
+|---|---|---|
+| `status` 查看状态 | 版本、服务状态、面板地址、证书指纹、接入命令 | 版本、服务状态、所属面板、agent 最近日志 |
+| `update` 更新 | 面板来源可选 GitHub 最新版、指定版本或本地 `dist/` 目录；FRP 可保持、升级到最新或指定版本 | 立即从面板重新下载 frp-panel 和 frpc（版本号相同也会重新下载） |
+| `rollback` 回滚 | 恢复到某次备份：只恢复程序，或程序和配置一起恢复 | 同左 |
+| `restart` / `logs` | 重启、查看日志（可持续跟踪） | 同左 |
+| `reset-password` | 重置管理员密码 | — |
+| `uninstall` | 卸载；加 `--purge` 同时删除配置 | 同左 |
+
+每次更新、回滚、重新安装和 `--purge` 卸载前，都会自动把程序和配置备份到 `/var/backups/frp-panel`，保留最近 5 份。命令行用法见 `frp-panel-ctl --help`，例如：
+
+```bash
+sudo frp-panel-ctl update --panel-bin ./dist --keep-frp -y   # 用本地编译结果更新，不动 FRP
+sudo frp-panel-ctl rollback -y                               # 回滚到最近一次备份（只恢复程序）
+sudo frp-panel-ctl rollback --with-config --backup 20261026-213135
+```
+
+`frp-panel-ctl` 内置在 frp-panel 程序中，每次更新后自动换成新版本。客户端的 agent 在后台自动升级时，下次运行 `frp-panel-ctl` 也会先换成新版本。未安装时，直接运行 `install.sh`（不带参数）也会打开菜单。
+
+### 多轮更新测试
+
+1. `./build.sh` 编译全部架构到 `dist/`。版本号取自 `git describe --dirty`，也可以用 `VERSION=0.2.0-test1 ./build.sh` 指定，每轮用不同的版本号
+2. 把 `dist/` 复制到服务端，运行 `sudo frp-panel-ctl update --panel-bin dist`。服务端会同时缓存其他架构的 frp-panel，开发版本也能分发给 ARM 客户端
+3. 客户端会在一分钟内自动跟随服务端的 frp-panel 和 FRP 版本。想立即更新，可以在客户端运行 `sudo frp-panel-ctl update`
+4. 有问题时运行 `sudo frp-panel-ctl rollback`，客户端会跟随服务端回到原来的版本
+
+客户端被删除或需要彻底清理时，可以不依赖本地文件，直接用面板提供的脚本卸载：`curl -fsSLk --pinnedpubkey '<pin>' https://<服务端>:7600/join.sh | sudo bash -s -- uninstall --purge`。
 
 ## 客户端是怎么被管理的
 
@@ -150,6 +175,9 @@ ssh root@server 'cd /root/frp-panel && bash install.sh server'   # 会自动使�
 
 ```bash
 go test ./...
+# 安装脚本的所有路径都可以用环境变量改到别处（FRP_PANEL_DATA_DIR、FRP_PANEL_FRP_DIR、FRP_PANEL_BIN_DIR、
+# FRP_PANEL_SYSTEMD_DIR、FRP_PANEL_BACKUP_DIR、FRP_PANEL_CTL_PATH），FRP_PANEL_ALLOW_NONROOT=1 允许非 root 运行，
+# 配合一个模拟的 systemctl / journalctl 就能在沙盒里反复测试安装、更新、回滚和卸载
 # 不依赖 systemd 的调试方式：--proc exec 让面板直接托管 frps/frpc 进程
 go run . init --role server --data ./dev/s --frp-dir ./dev/s --bin-dir /path/to/frp --listen 127.0.0.1:7600 --proc exec
 go run . serve --data ./dev/s

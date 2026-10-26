@@ -45,6 +45,7 @@ Usage:
   frp-panel agent run [--data DIR]               运行客户端 agent
   frp-panel reset-password [--data DIR]          重置管理员密码
   frp-panel info [--data DIR]                    显示访问地址、证书指纹与客户端接入命令
+  frp-panel install-script                       输出内置的安装 / 管理脚本
   frp-panel version
 `
 
@@ -67,6 +68,10 @@ func main() {
 		err = cmdInfo(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println(version)
+	case "install-script":
+		// Used by the installer to refresh frp-panel-ctl after an update,
+		// so the management script always matches the installed binary.
+		_, err = os.Stdout.Write(installScript)
 	default:
 		fmt.Print(usage)
 		os.Exit(2)
