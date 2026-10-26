@@ -45,7 +45,9 @@ type App struct {
 	ver   string
 	verAt time.Time
 
-	acmeOnce sync.Once
+	http80Mu   sync.Mutex // guards the on-demand :80 listener (startHTTP80)
+	http80On   bool
+	probeToken string
 }
 
 func (a *App) Serve(ctx context.Context) error {
@@ -54,7 +56,7 @@ func (a *App) Serve(ctx context.Context) error {
 	a.hist = newHistory(360)
 	go a.sample(ctx)
 	if cfg.TLS.Mode == store.TLSACME {
-		a.startACMEHTTP()
+		a.warmACME()
 	}
 
 	ln, err := net.Listen("tcp", cfg.Listen)
@@ -98,34 +100,6 @@ func (filteredLog) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// startACMEHTTP serves HTTP-01 challenges on :80 (only the challenge path;
-// everything else redirects to the HTTPS panel). TLS-ALPN-01 also works when
-// the panel itself listens on :443.
-func (a *App) startACMEHTTP() {
-	a.acmeOnce.Do(func() {
-		_, port, _ := net.SplitHostPort(a.St.Get().Listen)
-		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if ah := a.TLS.ACMEHTTPHandler(); ah != nil && strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
-				ah.ServeHTTP(w, r)
-				return
-			}
-			host := r.Host
-			if hh, _, err := net.SplitHostPort(host); err == nil {
-				host = hh
-			}
-			http.Redirect(w, r, "https://"+net.JoinHostPort(host, port)+r.URL.RequestURI(), http.StatusPermanentRedirect)
-		})
-		ln, err := net.Listen("tcp", ":80")
-		if err != nil {
-			if port != "443" {
-				a.TLS.SetACMEError("无法监听 80 端口进行 HTTP-01 验证（" + err.Error() + "）；请释放 80 端口，或让面板监听 443 端口")
-			}
-			return
-		}
-		go func() { _ = (&http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}).Serve(ln) }()
-	})
-}
-
 func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", a.handleLogin)
@@ -144,6 +118,8 @@ func (a *App) routes() http.Handler {
 	authed("PUT /api/tls", a.handleTLSPut)
 	authed("POST /api/tls/regenerate", a.handleTLSRegen)
 	authed("POST /api/tls/custom", a.handleTLSCustom)
+	authed("POST /api/tls/check", a.handleTLSCheck)
+	authed("POST /api/tls/issue", a.handleTLSIssue)
 	authed("GET /api/raw", a.handleRawGet)
 	authed("PUT /api/raw", a.handleRawPut)
 

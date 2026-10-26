@@ -3,6 +3,7 @@ import { html, render, useState, useEffect, api, setUnauthorizedHandler, Toasts,
 import { LogsPage, RawPage, SystemPage, SecurityPage, PasswordForm } from './pages-common.js';
 import { ServerDashboard, ServerProxies, ServerSettings } from './pages-server.js';
 import { ClientsPage } from './pages-clients.js';
+import { CertPage } from './pages-cert.js';
 
 const NAV = {
   server: [
@@ -15,13 +16,14 @@ const NAV = {
     { id: 'logs', label: '日志', icon: 'logs', page: LogsPage },
     { id: 'raw', label: '配置文件', icon: 'code', page: RawPage },
     { id: 'system', label: '系统', icon: 'server', page: SystemPage },
+    { id: 'cert', label: '证书', icon: 'lock', page: CertPage },
     { id: 'security', label: '安全', icon: 'shield', page: SecurityPage },
   ],
 };
 
 const SUBTITLE = {
   dashboard: '运行状态一览', proxies: 'frps 上正在运行的代理', clients: '集中管理所有内网机器及其代理', settings: 'frps.toml 常用参数',
-  logs: 'frps 实时运行日志', raw: '直接编辑 frps.toml', system: '服务控制与版本管理', security: '账号与 HTTPS 证书',
+  logs: 'frps 实时运行日志', raw: '直接编辑 frps.toml', system: '服务控制与版本管理', cert: 'HTTPS 证书与域名', security: '管理员账号',
 };
 
 // ---------- theme ----------

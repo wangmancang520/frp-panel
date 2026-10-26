@@ -5,6 +5,7 @@
 package tlsx
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -233,6 +234,7 @@ type Manager struct {
 	custom  *tls.Certificate
 	acme    *autocert.Manager
 	acmeErr string
+	issuing bool
 	// acmeHTTP serves HTTP-01 challenges while in ACME mode.
 	acmeHTTP http.Handler
 }
@@ -280,6 +282,7 @@ func (m *Manager) Configure(mode, domain, email string, extraSANs []string) erro
 		ah = am.HTTPHandler(nil)
 	}
 	m.mode, m.domain, m.self, m.custom, m.acme, m.acmeHTTP, m.acmeErr = mode, strings.ToLower(domain), &self, custom, am, ah, ""
+	m.issuing = false
 	m.mu.Unlock()
 	return nil
 }
@@ -320,12 +323,16 @@ func (m *Manager) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 		return custom, nil
 	case mode == "acme" && am != nil && name == domain:
 		c, err := am.GetCertificate(hello)
+		m.mu.Lock()
+		if err == nil {
+			m.acmeErr = ""
+		} else {
+			m.acmeErr = err.Error()
+		}
+		m.mu.Unlock()
 		if err == nil {
 			return c, nil
 		}
-		m.mu.Lock()
-		m.acmeErr = err.Error()
-		m.mu.Unlock()
 	}
 	// Access by bare IP (no SNI) or anything we can't serve: self-signed.
 	return self, nil
@@ -337,6 +344,50 @@ func (m *Manager) TLSConfig() *tls.Config {
 		MinVersion:     tls.VersionTLS12,
 		GetCertificate: m.getCertificate,
 		NextProtos:     []string{"h2", "http/1.1", acme.ALPNProto},
+	}
+}
+
+// IssueNow obtains the ACME certificate for the configured domain right away
+// (or loads it from the cache), instead of on the first visit by name. This
+// also starts autocert's background renewal. If ctx ends first, issuance
+// carries on in the background and the result shows up in Status.
+func (m *Manager) IssueNow(ctx context.Context) error {
+	m.mu.Lock()
+	am, domain := m.acme, m.domain
+	if am == nil {
+		m.mu.Unlock()
+		return errors.New("未启用 Let's Encrypt 自动申请")
+	}
+	m.issuing = true
+	m.mu.Unlock()
+	// Look like a modern browser so autocert picks an ECDSA certificate.
+	hello := &tls.ClientHelloInfo{
+		ServerName:        domain,
+		CipherSuites:      []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+		SupportedCurves:   []tls.CurveID{tls.X25519, tls.CurveP256},
+		SignatureSchemes:  []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256, tls.PSSWithSHA256},
+		SupportedVersions: []uint16{tls.VersionTLS13, tls.VersionTLS12},
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := am.GetCertificate(hello)
+		m.mu.Lock()
+		if m.acme == am {
+			m.issuing = false
+			if err == nil {
+				m.acmeErr = ""
+			} else {
+				m.acmeErr = err.Error()
+			}
+		}
+		m.mu.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -372,6 +423,7 @@ func (m *Manager) Status() map[string]any {
 			}
 		}
 		out["acmeError"] = m.acmeErr
+		out["acmeIssuing"] = m.issuing
 	}
 	return out
 }

@@ -343,3 +343,6 @@ details.adv summary { cursor: pointer; color: var(--text-2); font-weight: 550; m
 tr.click { cursor: pointer; }
 td a { color: var(--accent); text-decoration: none; }
 td a:hover { text-decoration: underline; }
+.checks { display: flex; flex-direction: column; gap: 8px; }
+.check-row { display: flex; gap: 10px; align-items: baseline; }
+.check-row .badge { flex: none; }

@@ -207,80 +207,17 @@ export function PasswordForm({ forced, username, onDone }) {
   </form>`;
 }
 
-// ---------- security / TLS ----------
-export function SecurityPage({ me }) {
-  const tls = usePoll(() => api('GET', '/tls'));
-  const [busy, run] = useAction();
-  const [mode, setMode] = useState(null);
-  const [acme, setAcme] = useState({ domain: '', email: '' });
-  const [custom, setCustom] = useState({ cert: '', key: '' });
-  const [sans, setSans] = useState('');
-  useEffect(() => {
-    const t = tls.data;
-    if (t && mode === null) {
-      setMode(t.mode);
-      setAcme({ domain: t.domain || '', email: t.email || '' });
-      setSans((t.extraSANs || []).join(', '));
-    }
-  }, [tls.data]);
-  const t = tls.data;
-  const self = t && t.selfSigned;
-  const regen = () => run(async () => {
-    if (!confirm('重新生成自签名证书后，浏览器会再次提示证书不受信任，需要重新确认指纹。继续？')) return;
-    await api('POST', '/tls/regenerate', { extraSANs: sans.split(/[\s,]+/).filter(Boolean) });
-    tls.reload();
-  }, '证书已重新生成，刷新页面后生效');
-  const applyMode = () => run(async () => {
-    if (mode === 'custom') await api('POST', '/tls/custom', custom);
-    else await api('PUT', '/tls', { mode, domain: acme.domain, email: acme.email });
-    tls.reload();
-  }, '证书设置已应用');
-
+// ---------- security ----------
+export function SecurityPage({ me, go }) {
   return html`<div class="grid two">
-    <div>
-      <div class="card">
-        <h2>管理员账号</h2><p class="desc">修改密码会注销其他所有会话。连续输错 5 次会锁定 15 分钟。</p>
-        <${PasswordForm} username=${me.username} />
-      </div>
+    <div class="card">
+      <h2>管理员账号</h2><p class="desc">修改密码会注销其他所有会话。连续输错 5 次会锁定 15 分钟。</p>
+      <${PasswordForm} username=${me.username} />
     </div>
-    <div>
-      <div class="card">
-        <div class="card-head"><h2>HTTPS 证书</h2><span class="badge ok">${icon('lock')}强制 HTTPS</span></div>
-        <${Alert}>面板只提供 HTTPS，用 http:// 访问会被重定向，不会以明文传输任何内容。<b>用 IP 访问时始终使用自签名证书</b>；配置域名证书后，用域名访问就不会再有浏览器警告。<//>
-        ${!t ? html`<${Spinner} />` : html`<div>
-          <h2 class="mt">自签名证书</h2>
-          <p class="desc">浏览器提示“不安全”时，请核对证书指纹与下方一致，以防中间人攻击。</p>
-          <dl class="kv">
-            <dt>SHA-256 指纹</dt><dd class="fp">${self.fingerprint} <button class="btn ghost sm icon" onClick=${() => copyText(self.fingerprint)}>${icon('copy')}</button></dd>
-            <dt>包含的 IP</dt><dd class="mono small">${(self.ips || []).join(', ')}</dd>
-            <dt>包含的域名</dt><dd class="mono small">${(self.dnsNames || []).join(', ')}</dd>
-            <dt>有效期至</dt><dd>${new Date(self.notAfter).toLocaleDateString('zh-CN')}</dd>
-          </dl>
-          <${Field} label="额外的 IP / 域名" help="例如 NAT 后的公网 IP，多个用逗号分隔。修改后需重新生成证书。">
-            <${TextInput} value=${sans} onInput=${setSans} placeholder="1.2.3.4, panel.example.com" /><//>
-          <button class="btn" disabled=${busy} onClick=${regen}>${icon('refresh')}重新生成自签名证书</button>
-
-          <h2 class="mt" style="margin-top:28px">域名证书</h2>
-          <p class="desc">可选。用域名访问时使用；用 IP 访问时仍然使用自签名证书。</p>
-          <div class="field"><${Seg} value=${mode} onChange=${setMode} options=${[
-            { value: 'selfsigned', label: '仅自签名' }, { value: 'acme', label: "Let's Encrypt 自动申请" }, { value: 'custom', label: '上传证书' }]} /></div>
-          ${mode === 'acme' && html`<div>
-            <${Alert} kind="warn">需要域名已解析到本机，并且 80 端口可用（HTTP-01 验证）；如果面板监听 443 端口，也可以用 TLS-ALPN 验证。<//>
-            <div class="fields">
-              <${Field} label="域名"><${TextInput} value=${acme.domain} onInput=${v => setAcme({ ...acme, domain: v })} placeholder="panel.example.com" /><//>
-              <${Field} label="邮箱（可选）"><${TextInput} value=${acme.email} onInput=${v => setAcme({ ...acme, email: v })} placeholder="you@example.com" /><//>
-            </div>
-            ${t.acme && html`<div class="muted small">当前证书：${t.acme.issuer}，到期 ${new Date(t.acme.notAfter).toLocaleDateString('zh-CN')}</div>`}
-            ${t.acmeError && html`<${Alert} kind="err">${t.acmeError}<//>`}
-          </div>`}
-          ${mode === 'custom' && html`<div>
-            ${t.custom && html`<div class="muted small" style="margin-bottom:10px">当前证书：${(t.custom.dnsNames || []).join(', ')}，到期 ${new Date(t.custom.notAfter).toLocaleDateString('zh-CN')}</div>`}
-            <${Field} label="证书（PEM，含中间证书链）"><textarea class="input" rows="5" value=${custom.cert} onInput=${e => setCustom({ ...custom, cert: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----"></textarea><//>
-            <${Field} label="私钥（PEM）"><textarea class="input" rows="4" value=${custom.key} onInput=${e => setCustom({ ...custom, key: e.target.value })} placeholder="-----BEGIN PRIVATE KEY-----"></textarea><//>
-          </div>`}
-          <button class="btn primary" disabled=${busy || (mode === 'custom' && (!custom.cert || !custom.key))} onClick=${applyMode}>应用证书设置</button>
-        </div>`}
-      </div>
+    <div class="card">
+      <h2>HTTPS 证书</h2>
+      <p class="desc">面板只提供 HTTPS。域名证书（Let's Encrypt 或上传证书）和自签名证书都在「证书」页管理。</p>
+      <button class="btn" onClick=${() => go('cert')}>${icon('lock')}前往证书页</button>
     </div>
   </div>`;
 }

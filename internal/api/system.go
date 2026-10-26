@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -189,10 +190,17 @@ func (a *App) handlePanelSettings(w http.ResponseWriter, r *http.Request) {
 // ---- TLS ----
 
 func (a *App) handleTLSGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, a.tlsStatus())
+}
+
+// tlsStatus is the certificate state shown on the 证书 page.
+func (a *App) tlsStatus() map[string]any {
+	cfg := a.St.Get()
 	st := a.TLS.Status()
-	st["extraSANs"] = a.St.Get().TLS.ExtraSANs
-	st["email"] = a.St.Get().TLS.Email
-	writeJSON(w, 200, st)
+	st["extraSANs"], st["email"] = cfg.TLS.ExtraSANs, cfg.TLS.Email
+	// The panel's own port, for links: the browser may be behind a proxy.
+	_, st["panelPort"], _ = net.SplitHostPort(cfg.Listen)
+	return st
 }
 
 func (a *App) handleTLSPut(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +232,7 @@ func (a *App) handleTLSPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Mode == store.TLSACME {
-		a.startACMEHTTP()
+		a.warmACME()
 	}
 	a.handleTLSGet(w, r)
 }
