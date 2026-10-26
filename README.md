@@ -6,6 +6,7 @@
 - **客户端一条命令接入**：面板给出接入命令，在内网机器上运行即可。程序从服务端下载，本机无需任何配置，也不开放任何端口
 - **集中管理**：在服务端面板为每台客户端添加代理（SSH、远程桌面、网站等模板），保存后几秒内自动下发并热重载；查看每台客户端的在线状态、代理状态、错误原因和日志
 - **统一升级**：服务端升级 FRP 或面板后，客户端自动跟随升级
+- **一体化管理工具**：每台机器上的 `sudo frp-panel-ctl` 提供交互菜单，可以查看状态、更新、回滚、查看日志和卸载；每次变更前自动备份
 - **通用功能**：实时流量、frps 设置表单、原始 TOML 编辑（保存前用 `frps/frpc verify` 校验）、GitHub 镜像
 - **单文件部署**：Go 后端内嵌前端，无需 Node、Nginx 或数据库
 
@@ -151,7 +152,7 @@ internal/fleet          受管客户端注册表、按客户端渲染 frpc.toml�
 internal/agent          客户端 agent（注册、同步配置、升级、上报）
 internal/api            HTTP 接口（面板 /api/*，agent /agent/v1/*）
 web/                    前端（Preact + htm，无需构建，已内置在 vendor/）
-install.sh              安装脚本（server / agent），同时内嵌进程序，由面板在 /join.sh 提供
+install.sh              安装 / 更新 / 回滚 / 卸载管理脚本（安装后即 frp-panel-ctl），内嵌进程序，由面板在 /join.sh 提供
 build.sh                交叉编译 linux amd64 / arm64 / armv7
 ```
 
@@ -168,7 +169,7 @@ build.sh                交叉编译 linux amd64 / arm64 / armv7
 ```bash
 ./build.sh                                 # 生成 dist/
 scp -r dist root@server:/root/frp-panel
-ssh root@server 'cd /root/frp-panel && bash install.sh server'   # 会自动使用 dist/ 里的程序
+ssh root@server 'cd /root/frp-panel && bash install.sh server'   # 会自动使用 dist/ 里的程序；不带参数运行则打开交互菜单
 ```
 
 ## 本地开发
