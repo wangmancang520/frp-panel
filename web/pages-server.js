@@ -1,7 +1,7 @@
 // Server (frps) pages.
 import {
   html, useState, useEffect, useMemo, api, usePoll, useAction, icon,
-  Field, TextInput, NumInput, SecretInput, Check, Seg, Alert, CodeBox, ServiceBadge, Stat, Spinner, Empty,
+  Field, TextInput, NumInput, SecretInput, Check, Seg, Alert, CodeBox, ServiceBadge, Stat, Num, Spinner, Empty,
   fmtBytes, fmtRate, since, fmtTime,
 } from './lib.js';
 import { ServiceControl } from './pages-common.js';
@@ -60,6 +60,61 @@ function TrafficChart({ history }) {
   </div>`;
 }
 
+// ---------- port usage ----------
+const OWNERS = [
+  { id: 'all', label: '全部端口' },
+  { id: 'frps', label: 'FRPS' },
+  { id: 'panel', label: '面板' },
+  { id: 'other', label: '其他进程' },
+];
+const OWNER_LABEL = { frps: 'FRPS', panel: '面板', other: '其他进程' };
+
+function PortRow({ p, i }) {
+  const title = p.owner === 'other' ? (p.process || '未知进程') : (p.role || p.process);
+  const proc = p.process ? `${p.process}${p.pid ? ' · PID ' + p.pid : ''}` : (p.pid ? 'PID ' + p.pid : '无法识别进程');
+  return html`<div class=${'port-row owner-' + p.owner} style=${'--i:' + i}>
+    <div class="port-num"><span class="mono">${p.port}</span><span class="badge type">${p.proto}</span></div>
+    <div style="min-width:0">
+      <div class="port-title"><span>${title}</span>${p.owner !== 'other' && html`<span class=${'badge owner-' + p.owner}>${OWNER_LABEL[p.owner]}</span>`}</div>
+      <div class="port-sub" title=${p.addrs.join(', ')}>${p.owner === 'other' ? '' : proc + ' · '}${p.addrs.join('  ')}</div>
+    </div>
+    <div class="port-scope">${p.public
+      ? html`<span class="scope public" title="监听在所有网卡或公网地址上，其他机器可以访问（仍受防火墙 / 安全组限制）">${icon('globe')}对外开放</span>`
+      : html`<span class="scope" title="只监听本机回环地址，其他机器无法访问">${icon('lock')}仅本机</span>`}</div>
+  </div>`;
+}
+
+function PortsCard() {
+  const [filter, setFilter] = useState('all');
+  const res = usePoll(() => api('GET', '/server/ports'), 15000);
+  const d = res.data;
+  const all = (d && d.ports) || [];
+  // The panel's and frps's ports first, then everything else, each by port.
+  const rank = { panel: 0, frps: 1, other: 2 };
+  const rows = all.filter(p => filter === 'all' || p.owner === filter)
+    .sort((a, b) => rank[a.owner] - rank[b.owner] || a.port - b.port || a.proto.localeCompare(b.proto));
+  const count = id => id === 'all' ? all.length : ((d && d.counts && d.counts[id]) || 0);
+  return html`<div class="card">
+    <div class="card-head">
+      <div>
+        <h2>端口占用</h2>
+        <div class="muted small">本机正在监听的 TCP 端口和已绑定的 UDP 端口${d ? ' · 更新于 ' + new Date(d.scannedAt * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : ''}</div>
+      </div>
+      <div class="grow"></div>
+      <button class="btn sm ghost icon" title="刷新" onClick=${res.reload}>${icon('refresh', res.loading ? 'spin' : '')}</button>
+    </div>
+    ${res.error && html`<${Alert} kind="err">${res.error.message}<//>`}
+    <div class="port-summary">
+      ${OWNERS.map(o => html`<button type="button" key=${o.id} class=${'port-tile t-' + o.id + (filter === o.id ? ' on' : '')} onClick=${() => setFilter(o.id)}>
+        <b>${d ? html`<${Num} value=${count(o.id)} />` : '-'}</b><span><i></i>${o.label}</span>
+      </button>`)}
+    </div>
+    ${!d && !res.error ? html`<${Spinner} />` : rows.length === 0
+      ? html`<${Empty} text=${filter === 'all' ? '没有检测到监听中的端口' : '没有这一类的端口'} />`
+      : html`<div class="port-list" key=${filter}>${rows.map((p, i) => html`<${PortRow} key=${p.proto + p.port + '-' + p.pid} p=${p} i=${i} />`)}</div>`}
+  </div>`;
+}
+
 // ---------- dashboard ----------
 export function ServerDashboard({ go }) {
   const ov = usePoll(() => api('GET', '/server/overview'), 5000);
@@ -89,6 +144,7 @@ export function ServerDashboard({ go }) {
         <div class="legend"><span><i style="background:var(--accent)"></i>入站</span><span><i style="background:var(--accent-2)"></i>出站</span></div></div>
       <${TrafficChart} history=${d.history} />
     </div>
+    <div class="mt"><${PortsCard} /></div>
     <div class="grid two mt">
       <${JoinCard} go=${go} />
       <div class="card">

@@ -127,6 +127,7 @@ func (a *App) routes() http.Handler {
 	authed("GET /api/server/settings", a.handleServerSettingsGet)
 	authed("PUT /api/server/settings", a.handleServerSettingsPut)
 	authed("GET /api/server/proxies", a.handleServerProxies)
+	authed("GET /api/server/ports", a.handleServerPorts)
 	authed("GET /api/server/join", a.handleServerJoin)
 	authed("POST /api/server/join/reset", a.handleServerJoinReset)
 

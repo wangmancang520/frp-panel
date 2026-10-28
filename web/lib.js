@@ -251,10 +251,35 @@ export function ServiceBadge({ s }) {
   return html`<span class="badge"><span class="dot"></span>已停止</span>`;
 }
 
+export const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Num counts up to value (from 0 on first show, then from the previous
+// value) with an ease-out; non-numbers are shown as they are.
+export function Num({ value }) {
+  const isNum = typeof value === 'number' && isFinite(value);
+  const [shown, setShown] = useState(isNum && !reducedMotion() ? 0 : value);
+  const prev = useRef(isNum ? 0 : null);
+  useEffect(() => {
+    const from = prev.current;
+    prev.current = isNum ? value : null;
+    if (!isNum || typeof from !== 'number' || from === value || reducedMotion()) { setShown(value); return; }
+    let raf;
+    const start = performance.now(), dur = Math.min(900, 350 + Math.abs(value - from) * 25);
+    const step = t => {
+      const k = Math.min(1, (t - start) / dur);
+      setShown(Math.round(from + (value - from) * (1 - Math.pow(1 - k, 3))));
+      if (k < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [value]);
+  return isNum ? String(shown) : value;
+}
+
 export function Stat({ label, value, unit, hint, ic }) {
   return html`<div class="card stat">
     <div class="label">${label}</div>
-    <div class="value">${value}${unit && html`<small>${unit}</small>`}</div>
+    <div class="value">${typeof value === 'number' ? html`<${Num} value=${value} />` : value}${unit && html`<small>${unit}</small>`}</div>
     ${hint && html`<div class="hint">${hint}</div>`}
     ${ic && html`<div class="icon">${icon(ic)}</div>`}
   </div>`;
