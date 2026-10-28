@@ -145,7 +145,7 @@ func (a *App) handleClientDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]string{"message": "已删除。该机器上的 frpc 会被 agent 停止；如需彻底清理，请在该机器上运行 install.sh uninstall"})
+	writeJSON(w, 200, map[string]string{"message": "已删除。该机器上的 frpc 会被 agent 停止；如需清理该机器上的配置，请在该机器上运行 sudo frp-client remove（或 frp-client uninstall）"})
 }
 
 func (a *App) handleClientRestart(w http.ResponseWriter, r *http.Request) {

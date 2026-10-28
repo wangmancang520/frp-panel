@@ -3,7 +3,8 @@
 #
 #   交互菜单： sudo frp-panel-ctl               （安装后可用；未安装时运行本脚本不带参数）
 #   服务端：   curl -fsSL <url>/install.sh | sudo bash -s -- server
-#   客户端：   在服务端面板「客户端」页复制接入命令（agent 模式，程序和配置都来自服务端）
+#   客户端：   在服务端面板「客户端」页复制接入命令（agent 模式，程序和配置都来自服务端）。
+#              客户端可以接入多台服务端，本机管理用 frp-client（client.sh，服务端失联时也能用）
 #   其他：     sudo frp-panel-ctl update | rollback | status | logs | restart | reset-password | uninstall
 #
 # 测试用：所有路径都可以用 FRP_PANEL_*_DIR 等环境变量改到别处（见下方），
@@ -18,6 +19,8 @@ BIN_DIR="${FRP_PANEL_BIN_DIR:-/usr/local/bin}"
 SYSTEMD_DIR="${FRP_PANEL_SYSTEMD_DIR:-/etc/systemd/system}"
 BACKUP_DIR="${FRP_PANEL_BACKUP_DIR:-/var/backups/frp-panel}"
 CTL_PATH="${FRP_PANEL_CTL_PATH:-/usr/local/sbin/frp-panel-ctl}"
+CLIENT_PATH="${FRP_CLIENT_PATH:-/usr/local/sbin/frp-client}"
+LIB_DIR="${FRP_PANEL_LIB_DIR:-/usr/local/lib/frp-panel}"
 FRP_USER=frp
 KEEP_BACKUPS=5
 
@@ -34,7 +37,7 @@ TOKEN=""
 PANEL_URL=""
 PIN=""
 ENROLL_KEY=""
-AGENT_TOKEN=""
+NAME=""           # agent: instance name for this server on the client
 FIREWALL=1
 PURGE=0
 FORCE=0
@@ -58,9 +61,9 @@ FRP Panel 安装 / 管理程序
 
 命令:
   server              安装服务端（面板 + frps）
-  agent               安装受管客户端（使用面板生成的接入命令）
-  update              更新：服务端更新面板和 FRP；客户端立即从面板重新下载程序
-  rollback            回滚到更新前的备份
+  agent               接入受管客户端（使用面板生成的接入命令；同一台机器可接入多台服务端）
+  update              更新：服务端更新面板和 FRP；客户端立即从各面板重新下载程序
+  rollback            服务端：回滚到更新前的备份
   status              查看版本、服务状态和访问信息
   logs                查看服务日志
   restart             重启本机的 FRP Panel 相关服务
@@ -86,7 +89,11 @@ FRP Panel 安装 / 管理程序
   --panel URL         服务端面板地址，如 https://1.2.3.4:7600
   --pin PIN           面板证书公钥指纹（sha256//...）
   --key KEY           接入密钥
+  --name NAME         本机上这台服务端的实例名称（默认按面板地址生成）
   --force             已接入时重新注册为新的客户端
+
+客户端机器上的日常管理（列表、日志、删除某台服务端、卸载）请使用 frp-client，
+它在服务端失联时也能使用。
 
 其他选项:
   --backup ID         rollback：要恢复的备份（默认最近一次）
@@ -114,6 +121,7 @@ parse_args() {
       --panel)         PANEL_URL="$2"; shift 2 ;;
       --pin)           PIN="$2"; shift 2 ;;
       --key)           ENROLL_KEY="$2"; shift 2 ;;
+      --name)          NAME="$2"; shift 2 ;;
       --backup)        BACKUP_ID="$2"; shift 2 ;;
       --with-config)   WITH_CONFIG=1; shift ;;
       --follow|-f)     FOLLOW=1; shift ;;
@@ -225,21 +233,38 @@ detect_arch() {
   esac
 }
 
-# role: none | server | agent | legacy-client. Config left behind by an
-# uninstall without --purge does not count; a reinstall picks it up.
+# role: none | server | client | legacy-client. A server's config left behind
+# by an uninstall without --purge does not count; a reinstall picks it up.
+# "client" is a machine joined to one or more servers (managed by frp-client).
 role() {
-  if [[ ! -x "$BIN_DIR/frp-panel" ]]; then
-    echo none
-  elif [[ -f "$DATA_DIR/panel.json" ]]; then
+  if [[ -f "$DATA_DIR/panel.json" && -x "$BIN_DIR/frp-panel" ]]; then
     if grep -q '"role": "client"' "$DATA_DIR/panel.json"; then echo legacy-client; else echo server; fi
-  elif [[ -f "$DATA_DIR/agent.json" ]]; then
-    echo agent
+  elif [[ -f "$DATA_DIR/agent.json" ]] || compgen -G "$DATA_DIR/servers/*/agent.json" >/dev/null; then
+    echo client
   else
     echo none
   fi
 }
 
-units_of() { case "$1" in server) echo "frps frp-panel" ;; agent) echo "frpc frp-panel-agent" ;; legacy-client) echo "frpc frp-panel" ;; esac; }
+units_of() { case "$1" in server) echo "frps frp-panel" ;; legacy-client) echo "frpc frp-panel" ;; esac; }
+
+# script_version FILE: FRP_CLIENT_SCRIPT_VERSION of a frp-client script (empty if missing).
+script_version() { [[ -f "$1" ]] || return 0; sed -n 's/^FRP_CLIENT_SCRIPT_VERSION=\([0-9][0-9]*\).*/\1/p' "$1" | head -1; }
+
+# run_client ARGS...: runs frp-client, which manages client machines. Falls
+# back to the copy embedded in an installed frp-panel when it is missing.
+run_client() {
+  local s="$CLIENT_PATH" b
+  if [[ ! -f "$s" ]]; then
+    s="$WORK/frp-client"
+    for b in "$LIB_DIR"/*/frp-panel "$BIN_DIR/frp-panel"; do
+      [[ -x "$b" ]] && "$b" client-script >"$s" 2>/dev/null && [[ -s "$s" ]] && break
+      rm -f "$s"
+    done
+    [[ -f "$s" ]] || die "找不到 frp-client。可以直接运行: curl -fsSL https://raw.githubusercontent.com/${PANEL_REPO}/main/client.sh | sudo bash -s -- $*"
+  fi
+  FRP_CLIENT_PATH="$CLIENT_PATH" bash "$s" "$@"
+}
 
 ver_panel() { "$BIN_DIR/frp-panel" version 2>/dev/null || echo "-"; }
 ver_frp() { local v; v=$("$BIN_DIR/$1" -v 2>/dev/null) && echo "$v" || echo "-"; }
@@ -423,26 +448,6 @@ WantedBy=multi-user.target
 EOF
 }
 
-# The agent runs as root: it rewrites frpc.toml, controls frpc via systemctl
-# and replaces the frpc / frp-panel binaries when the server upgrades.
-write_agent_unit() {
-  cat > "${SYSTEMD_DIR}/frp-panel-agent.service" <<EOF
-[Unit]
-Description=FRP Panel agent (frpc managed by the server panel)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${BIN_DIR}/frp-panel agent run --data ${DATA_DIR} --frp-dir ${FRP_DIR} --bin-dir ${BIN_DIR}
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
 open_ports() { # "7000/tcp 7600/tcp ..."
   (( FIREWALL )) || return 0
   local p
@@ -547,7 +552,7 @@ do_server() {
   r=$(role)
   [[ -f "$DATA_DIR/panel.json" ]] && had_data=1
   case "$r" in
-    agent) die "本机是受管客户端，不能同时安装服务端（先卸载）" ;;
+    client) die "本机是受管客户端，不能同时安装服务端（先用 frp-client uninstall 卸载）" ;;
     legacy-client) die "本机装有旧版客户端面板，请先卸载" ;;
   esac
   if (( had_data )); then
@@ -656,14 +661,15 @@ do_server_update() {
 }
 
 # ---------- agent ----------
-agent_conf() { sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" "$DATA_DIR/agent.json" | head -1; }
+# Client machines are managed by frp-client (client.sh, embedded in every
+# frp-panel binary). The join command runs this script with "agent": it gets
+# this server's frp-panel, takes frp-client out of it and lets frp-client do
+# the join, so one machine can be joined to several servers.
 
 # panel_get PATH OUTPUT: download from the server panel, trusting only its
-# pinned key; authenticates with the agent token or the enrollment key.
+# pinned key; authenticates with the enrollment key.
 panel_get() {
-  local auth=(-H "X-Enroll-Key: ${ENROLL_KEY}")
-  [[ -n "$AGENT_TOKEN" ]] && auth=(-H "Authorization: Bearer ${AGENT_TOKEN}")
-  curl -fsSLk --pinnedpubkey "$PIN" --retry 3 --connect-timeout 15 "${auth[@]}" \
+  curl -fsSLk --pinnedpubkey "$PIN" --retry 3 --connect-timeout 15 -H "X-Enroll-Key: ${ENROLL_KEY}" \
     "${PANEL_URL%/}$1" -o "$2" \
     || die "从面板下载失败: ${PANEL_URL%/}$1（请确认面板可达，且安全组已放行面板端口）"
 }
@@ -690,91 +696,38 @@ prompt_join() {
 }
 
 do_agent() {
-  local out r
+  local script mine have
   require_root; check_os; install_deps; detect_arch
   prompt_join
   [[ -n "$PANEL_URL" && -n "$PIN" && -n "$ENROLL_KEY" ]] \
     || die "缺少 --panel / --pin / --key，请在服务端面板「客户端」页复制完整的接入命令"
   [[ "$PANEL_URL" == https://* ]] || die "--panel 必须是 https:// 地址"
-  r=$(role)
-  case "$r" in
-    server) die "本机已安装服务端面板，不能同时作为受管客户端" ;;
-    legacy-client)
-      warn "检测到旧版客户端面板，将停用它并改为由服务端管理（原有代理需要在服务端面板重新添加）"
-      confirm "继续？" y || die "已取消"
-      backup_create "迁移旧版客户端前"
-      systemctl disable --now frp-panel >/dev/null 2>&1 || true
-      rm -f "${SYSTEMD_DIR}/frp-panel.service"
-      mv "$DATA_DIR/panel.json" "$DATA_DIR/panel.json.old-client"
-      ;;
-    agent) backup_create "重新接入前" ;;
-  esac
+  [[ "$(role)" == server ]] && die "本机已安装服务端面板，不能同时作为受管客户端"
 
   info "从面板下载 frp-panel (${FRP_ARCH})"
   panel_get "/agent/v1/download/frp-panel?arch=${FRP_ARCH}" "$WORK/frp-panel"
   chmod 0755 "$WORK/frp-panel"
-  "$WORK/frp-panel" version >/dev/null || die "下载的 frp-panel 无法运行"
-  systemctl stop frp-panel-agent >/dev/null 2>&1 || true
-  install -m 0755 "$WORK/frp-panel" "${BIN_DIR}/frp-panel"
-  ok "已安装 ${BIN_DIR}/frp-panel v$(ver_panel)"
-  ensure_user
-  install_ctl
+  "$WORK/frp-panel" version >/dev/null 2>&1 || die "下载的 frp-panel 无法运行"
+  "$WORK/frp-panel" client-script >"$WORK/frp-client" 2>/dev/null && [[ -s "$WORK/frp-client" ]] \
+    || die "该服务端的面板版本过旧，不支持多服务端接入，请先升级服务端"
 
-  info "注册到面板并下载 frpc"
-  local args=(agent enroll --panel "$PANEL_URL" --pin "$PIN" --key "$ENROLL_KEY"
-              --data "$DATA_DIR" --frp-dir "$FRP_DIR" --bin-dir "$BIN_DIR")
+  # Another server may run a newer version whose frp-client is already
+  # installed here; the newest script understands every older layout.
+  script="$WORK/frp-client"
+  mine=$(script_version "$WORK/frp-client"); have=$(script_version "$CLIENT_PATH")
+  if [[ -f "$CLIENT_PATH" ]] && (( ${have:-0} > ${mine:-0} )); then script="$CLIENT_PATH"; fi
+
+  local args=(join --panel "$PANEL_URL" --pin "$PIN" --key "$ENROLL_KEY" --binary "$WORK/frp-panel")
+  [[ -n "$NAME" ]] && args+=(--name "$NAME")
   (( FORCE )) && args+=(--force)
-  out=$("${BIN_DIR}/frp-panel" "${args[@]}") || die "注册失败"
-  get() { grep "^$1=" <<<"$out" | head -1 | cut -d= -f2-; }
-  ok "已安装 ${BIN_DIR}/frpc ($(ver_frp frpc))"
-
-  fix_perms "${FRP_DIR}/frpc.toml"
-  write_frp_unit frpc
-  write_agent_unit
-  systemctl daemon-reload
-  systemctl enable frpc frp-panel-agent >/dev/null 2>&1
-  systemctl restart frpc frp-panel-agent
-  wait_active frpc frp-panel-agent || true
-  echo
-  echo "${c_b}════════════════════════ 接入完成 ════════════════════════${c_0}"
-  echo "  客户端:     $(get CLIENT_NAME)（ID $(get CLIENT_ID)）"
-  echo "  服务端面板: ${PANEL_URL}"
-  echo "  本机无需任何配置，也不开放任何端口。请回到服务端面板「客户端」页为它添加代理。"
-  echo "  以后运行 ${c_b}sudo frp-panel-ctl${c_0} 即可查看状态、立即更新或卸载。"
-  echo "${c_b}═══════════════════════════════════════════════════════════${c_0}"
-}
-
-# do_agent_update: fetches frp-panel and frpc from the panel right now, even
-# if the version strings match (useful when testing rebuilt binaries).
-do_agent_update() {
-  local old_panel old_frpc
-  require_root; detect_arch
-  PANEL_URL=$(agent_conf panel); PIN=$(agent_conf pin); AGENT_TOKEN=$(agent_conf token)
-  [[ -n "$PANEL_URL" && -n "$PIN" && -n "$AGENT_TOKEN" ]] || die "$DATA_DIR/agent.json 不完整，请重新运行接入命令"
-  old_panel=$(ver_panel); old_frpc=$(ver_frp frpc)
-  info "从面板 ${PANEL_URL} 下载程序"
-  panel_get "/agent/v1/download/frp-panel?arch=${FRP_ARCH}" "$WORK/frp-panel"
-  panel_get "/agent/v1/download/frpc?arch=${FRP_ARCH}" "$WORK/frpc"
-  chmod 0755 "$WORK/frp-panel" "$WORK/frpc"
-  "$WORK/frp-panel" version >/dev/null || die "下载的 frp-panel 无法运行"
-  "$WORK/frpc" -v >/dev/null || die "下载的 frpc 无法运行"
-  echo "  frp-panel: v${old_panel} → v$("$WORK/frp-panel" version)"
-  echo "  frpc:      ${old_frpc} → $("$WORK/frpc" -v)"
-  confirm "开始更新？" y || die "已取消"
-  backup_create "更新前"
-  systemctl stop frp-panel-agent frpc
-  install -m 0755 "$WORK/frp-panel" "${BIN_DIR}/frp-panel"
-  install -m 0755 "$WORK/frpc" "${BIN_DIR}/frpc"
-  install_ctl
-  systemctl start frpc frp-panel-agent
-  wait_active frpc frp-panel-agent && ok "更新完成" \
-    || { warn "更新后服务未能正常启动，可以运行 sudo frp-panel-ctl rollback 回滚"; return 1; }
+  (( YES )) && args+=(-y)
+  FRP_CLIENT_PATH="$CLIENT_PATH" bash "$script" "${args[@]}"
 }
 
 do_update() {
   case "$(role)" in
     server) do_server_update ;;
-    agent)  do_agent_update ;;
+    client) run_client update --all ;;
     legacy-client) die "旧版客户端面板请改用服务端面板的接入命令重新安装" ;;
     *) die "未检测到安装" ;;
   esac
@@ -786,6 +739,7 @@ do_rollback() {
   require_root
   r=$(role)
   [[ "$r" == none ]] && die "本机当前未安装。请先重新安装，再回滚（可选择连同配置一起恢复）"
+  [[ "$r" == client ]] && die "客户端的程序跟随各服务端的版本，不需要回滚；可用 frp-client update 立即重新下载"
   mapfile -t ids < <(backup_list)
   (( ${#ids[@]} )) || die "没有可用的备份（${BACKUP_DIR}）"
   if [[ -n "$BACKUP_ID" ]]; then
@@ -802,7 +756,6 @@ do_rollback() {
   fi
   [[ -d "$BACKUP_DIR/$id" ]] || die "备份不存在: $id"
   echo "  恢复到: $(backup_desc "$id")$( (( WITH_CONFIG )) && echo '（含配置）')"
-  [[ "$r" == agent ]] && warn "受管客户端会自动跟随服务端版本，回滚的程序可能很快又被 agent 更新"
   confirm "开始回滚？" y || die "已取消"
 
   backup_create "回滚前"
@@ -833,7 +786,8 @@ do_rollback() {
 do_status() {
   local r u
   r=$(role)
-  echo "${c_b}角色:${c_0}      $(case "$r" in server) echo 服务端 ;; agent) echo 受管客户端 ;; legacy-client) echo 旧版客户端面板 ;; *) echo 未安装 ;; esac)"
+  if [[ "$r" == client ]]; then run_client list; return; fi
+  echo "${c_b}角色:${c_0}      $(case "$r" in server) echo 服务端 ;; legacy-client) echo 旧版客户端面板 ;; *) echo 未安装 ;; esac)"
   [[ "$r" == none ]] && return 0
   echo "${c_b}版本:${c_0}      frp-panel v$(ver_panel)   frps $(ver_frp frps)   frpc $(ver_frp frpc)"
   echo "${c_b}服务:${c_0}"
@@ -842,11 +796,6 @@ do_status() {
   done
   echo
   "$BIN_DIR/frp-panel" info --data "$DATA_DIR" 2>/dev/null || true
-  if [[ "$r" == agent ]]; then
-    echo
-    echo "${c_b}agent 最近日志:${c_0}"
-    journalctl -u frp-panel-agent -n 8 --no-pager -o cat 2>/dev/null | sed 's/^/  /' || true
-  fi
   local n
   n=$(backup_list | wc -l)
   echo
@@ -856,6 +805,7 @@ do_status() {
 do_logs() {
   local r units u
   r=$(role)
+  if [[ "$r" == client ]]; then run_client logs $( (( FOLLOW )) && echo -f); return; fi
   units=$(units_of "$r")
   [[ -n "$units" ]] || die "未检测到安装"
   # shellcheck disable=SC2206
@@ -877,6 +827,7 @@ do_logs() {
 do_restart() {
   local units
   require_root
+  [[ "$(role)" == client ]] && { run_client restart --all; return; }
   units=$(units_of "$(role)")
   [[ -n "$units" ]] || die "未检测到安装"
   # shellcheck disable=SC2086
@@ -897,6 +848,7 @@ do_uninstall() {
   local u r
   require_root
   r=$(role)
+  if [[ "$r" == client ]]; then run_client uninstall $( (( YES )) && echo -y); return; fi
   if (( INTERACTIVE )); then
     confirm "确定卸载 FRP Panel？" n || die "已取消"
     (( PURGE )) || { confirm "同时删除配置和数据（$FRP_DIR、$DATA_DIR）？" n && PURGE=1; } || true
@@ -904,7 +856,7 @@ do_uninstall() {
   if (( PURGE )) && [[ "$r" != none ]]; then
     backup_create "卸载前"
   fi
-  for u in frp-panel frp-panel-agent frps frpc; do
+  for u in frp-panel frps frpc; do
     if [[ -f "${SYSTEMD_DIR}/$u.service" ]]; then
       systemctl disable --now "$u" >/dev/null 2>&1 || true
       rm -f "${SYSTEMD_DIR}/$u.service"
@@ -934,7 +886,7 @@ header() {
   echo "${c_b}══════════════ FRP Panel 管理 ══════════════${c_0}"
   case "$r" in
     server) echo "  服务端   面板 v$(ver_panel) · $(ver_frp frps | sed 's/^/frps /') · frp-panel $(systemctl is-active frp-panel 2>/dev/null || true) · frps $(systemctl is-active frps 2>/dev/null || true)" ;;
-    agent)  echo "  受管客户端   agent v$(ver_panel) · frpc $(ver_frp frpc) · agent $(systemctl is-active frp-panel-agent 2>/dev/null || true) · frpc $(systemctl is-active frpc 2>/dev/null || true)" ;;
+    client) echo "  受管客户端（由 frp-client 管理）" ;;
     legacy-client) echo "  旧版客户端面板（已不再支持，请迁移为受管客户端）" ;;
     *) echo "  本机尚未安装" ;;
   esac
@@ -970,15 +922,9 @@ menu() {
           4) run_action do_restart ;; 5) run_action do_logs ;; 6) run_action show_join ;;
           7) run_action do_reset_password ;; 8) run_action do_server ;; 9) run_action do_uninstall ;; 10) return ;;
         esac ;;
-      agent)
-        i=$(choose "请选择操作" "查看状态" "立即从面板更新程序" "回滚到备份" "重启服务" "查看日志" \
-                   "重新接入（粘贴新的接入命令）" "卸载" "退出")
-        case "$i" in
-          1) run_action do_status ;; 2) run_action do_agent_update ;; 3) run_action do_rollback ;;
-          4) run_action do_restart ;; 5) run_action do_logs ;;
-          6) PANEL_URL=""; PIN=""; ENROLL_KEY=""; run_action do_agent ;;
-          7) run_action do_uninstall ;; 8) return ;;
-        esac ;;
+      client)
+        # Client machines have their own menu (several servers, offline use).
+        run_client menu; return ;;
       legacy-client)
         i=$(choose "请选择操作" "迁移为受管客户端（粘贴服务端面板的接入命令）" "卸载" "退出")
         case "$i" in 1) run_action do_agent ;; 2) run_action do_uninstall ;; 3) return ;; esac ;;

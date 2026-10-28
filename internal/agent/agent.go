@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,12 +39,33 @@ type Config struct {
 	Pin   string `json:"pin"`   // sha256//<base64> of the panel's public key
 	ID    string `json:"id"`
 	Token string `json:"token"`
+	// AdminPort is this machine's port for frpc's local admin API. A machine
+	// can be managed by several servers, one frpc each, so the port is chosen
+	// locally and overrides whatever the server renders.
+	AdminPort int `json:"adminPort,omitempty"`
 }
 
 // Options locate the agent's files.
 type Options struct {
 	Data, FRPDir, BinDir, Version string
+	// Unit is frpc's systemd unit, e.g. "frpc@myserver" (default "frpc").
+	Unit string
+	// ClientScript is the frp-client management script embedded in this
+	// binary; the agent installs it at ClientScriptPath when it is newer.
+	ClientScript     []byte
+	ClientScriptPath string
 }
+
+func (o Options) unit() string {
+	if o.Unit == "" {
+		return "frpc"
+	}
+	return o.Unit
+}
+
+// appliedFile records the hash of the server-rendered config last written,
+// which differs from the file on disk once the admin port is overridden.
+const appliedFile = "applied"
 
 func ConfigPath(dir string) string { return filepath.Join(dir, configFile) }
 
@@ -246,14 +269,14 @@ func newAgent(o Options, cfg Config) *Agent {
 	a := &Agent{
 		o: o, cfg: cfg,
 		api:      &apiClient{base: strings.TrimRight(cfg.Panel, "/"), token: cfg.Token, hc: newHTTPClient(cfg.Pin)},
-		proc:     frp.Systemd{Unit: "frpc"},
+		proc:     frp.Systemd{Unit: o.unit()},
 		confPath: filepath.Join(o.FRPDir, "frpc.toml"),
 		frpcBin:  filepath.Join(o.BinDir, "frpc"),
 	}
 	// seen starts empty so the first poll returns at once and the agent
 	// catches up on anything that changed while it was not running.
-	if b, err := os.ReadFile(a.confPath); err == nil {
-		a.applied = fleet.Hash(b)
+	if b, err := os.ReadFile(filepath.Join(o.Data, appliedFile)); err == nil {
+		a.applied = strings.TrimSpace(string(b))
 	}
 	a.frpcVersion = frp.InstalledVersion(a.frpcBin)
 	return a
@@ -323,6 +346,16 @@ func Enroll(o Options, panel, pin, key string, force bool) error {
 		return fmt.Errorf("获取配置失败：%w", err)
 	}
 	fmt.Printf("CLIENT_ID=%s\n", cfg.ID)
+	if cfg.AdminPort == 0 {
+		if cfg.AdminPort, err = pickAdminPort(o.Data); err != nil {
+			return err
+		}
+		if err := cfg.save(o.Data); err != nil {
+			return err
+		}
+		a.cfg = cfg
+	}
+	fmt.Printf("ADMIN_PORT=%d\n", cfg.AdminPort)
 
 	if a.frpcVersion == "" || (cr.FRPVersion != "" && a.frpcVersion != cr.FRPVersion) {
 		if err := a.installFRPC(ctx, cr.FRPVersion); err != nil {
@@ -332,10 +365,79 @@ func Enroll(o Options, panel, pin, key string, force bool) error {
 	if err := os.MkdirAll(o.FRPDir, 0o755); err != nil {
 		return err
 	}
-	if err := frp.Verify(a.frpcBin, a.confPath, []byte(cr.Config)); err != nil {
+	b, _, err := a.localize([]byte(cr.Config))
+	if err != nil {
 		return err
 	}
-	return store.WriteFileAtomic(a.confPath, []byte(cr.Config), 0o640)
+	if err := frp.Verify(a.frpcBin, a.confPath, b); err != nil {
+		return err
+	}
+	if err := store.WriteFileAtomic(a.confPath, b, 0o640); err != nil {
+		return err
+	}
+	return a.saveApplied(cr.Hash)
+}
+
+// pickAdminPort chooses a free local port for frpc's admin API, avoiding the
+// ports of the other server instances next to dataDir, and 7400, which the
+// single-server agents of earlier versions use.
+func pickAdminPort(dataDir string) (int, error) {
+	used := map[int]bool{7400: true}
+	parent := filepath.Dir(filepath.Clean(dataDir))
+	if entries, err := os.ReadDir(parent); err == nil {
+		for _, e := range entries {
+			dir := filepath.Join(parent, e.Name())
+			if dir == filepath.Clean(dataDir) {
+				continue
+			}
+			if c, err := Load(dir); err == nil {
+				used[c.AdminPort] = true
+			}
+		}
+	}
+	for p := 7401; p < 7500; p++ {
+		if used[p] {
+			continue
+		}
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			continue
+		}
+		ln.Close()
+		return p, nil
+	}
+	return 0, errors.New("找不到可用的本地端口（7401-7499）用于 frpc 管理接口")
+}
+
+// localize turns the config rendered by the server into this machine's:
+// the server knows nothing about other frpc instances here, so the admin
+// port is replaced by the one chosen locally.
+func (a *Agent) localize(b []byte) ([]byte, frp.Doc, error) {
+	d, err := frp.ParseDoc(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	if a.cfg.AdminPort > 0 {
+		frp.SetAdminPort(d, a.cfg.AdminPort)
+	}
+	out, err := d.Marshal()
+	return out, d, err
+}
+
+func (a *Agent) saveApplied(hash string) error {
+	return store.WriteFileAtomic(filepath.Join(a.o.Data, appliedFile), []byte(hash+"\n"), 0o600)
+}
+
+// Leave unregisters this machine from its panel. Used when a server
+// connection is removed locally; it fails quickly if the panel is gone.
+func Leave(o Options) error {
+	cfg, err := Load(o.Data)
+	if err != nil {
+		return err
+	}
+	api := &apiClient{base: strings.TrimRight(cfg.Panel, "/"), token: cfg.Token, hc: newHTTPClient(cfg.Pin)}
+	_, err = api.do(context.Background(), 8*time.Second, "POST", "/agent/v1/leave", struct{}{}, nil)
+	return err
 }
 
 // Run keeps the machine in sync with the panel until ctx ends.
@@ -345,7 +447,8 @@ func Run(ctx context.Context, o Options) error {
 		return fmt.Errorf("尚未注册到面板（%v）；请在服务端面板复制接入命令运行", err)
 	}
 	a := newAgent(o, cfg)
-	log.Printf("FRP Panel agent %s: client %s, panel %s", o.Version, cfg.ID, cfg.Panel)
+	log.Printf("FRP Panel agent %s: client %s, panel %s, frpc unit %s", o.Version, cfg.ID, cfg.Panel, o.unit())
+	installClientScript(o)
 	go a.reportLoop(ctx)
 	a.configLoop(ctx)
 	return nil
@@ -403,6 +506,9 @@ func (a *Agent) apply(ctx context.Context, cr fleet.ConfigResponse) {
 			a.setErr(err)
 			return
 		}
+		if err := a.saveApplied(cr.Hash); err != nil {
+			log.Print(err)
+		}
 		a.mu.Lock()
 		a.applied, a.lastErr = cr.Hash, ""
 		a.mu.Unlock()
@@ -415,16 +521,16 @@ func (a *Agent) apply(ctx context.Context, cr fleet.ConfigResponse) {
 
 // writeConfig verifies and installs a new frpc.toml, then makes it effective:
 // hot reload when only proxies changed, otherwise a restart.
-func (a *Agent) writeConfig(b []byte) error {
+func (a *Agent) writeConfig(server []byte) error {
+	b, d, err := a.localize(server)
+	if err != nil {
+		return err
+	}
 	if err := frp.Verify(a.frpcBin, a.confPath, b); err != nil {
 		return err
 	}
 	old, _ := frp.LoadDoc(a.confPath)
 	if err := store.WriteFileAtomic(a.confPath, b, 0o640); err != nil {
-		return err
-	}
-	d, err := frp.ParseDoc(b)
-	if err != nil {
 		return err
 	}
 	if !a.proc.Status().Running {
@@ -556,4 +662,36 @@ func (a *Agent) collect(withLogs bool) fleet.Report {
 		rep.Logs = a.proc.Logs(300)
 	}
 	return rep
+}
+
+// ---- frp-client script ----
+
+var scriptVersionRe = regexp.MustCompile(`(?m)^FRP_CLIENT_SCRIPT_VERSION=(\d+)`)
+
+// ScriptVersion reads FRP_CLIENT_SCRIPT_VERSION from a frp-client script (0 if absent).
+func ScriptVersion(b []byte) int {
+	m := scriptVersionRe.FindSubmatch(b)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(string(m[1]))
+	return n
+}
+
+// installClientScript refreshes an installed frp-client when this binary
+// carries a newer one. A machine managed by servers on different versions
+// thereby keeps the newest script, which understands all older layouts.
+func installClientScript(o Options) {
+	if len(o.ClientScript) == 0 || o.ClientScriptPath == "" {
+		return
+	}
+	have, err := os.ReadFile(o.ClientScriptPath)
+	if err != nil || ScriptVersion(o.ClientScript) <= ScriptVersion(have) {
+		return
+	}
+	if err := store.WriteFileAtomic(o.ClientScriptPath, o.ClientScript, 0o755); err != nil {
+		log.Printf("更新 %s 失败：%v", o.ClientScriptPath, err)
+		return
+	}
+	log.Printf("已更新 %s（脚本版本 %d）", o.ClientScriptPath, ScriptVersion(o.ClientScript))
 }

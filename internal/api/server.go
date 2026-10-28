@@ -151,6 +151,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("POST /agent/v1/enroll", a.handleAgentEnroll)
 	mux.HandleFunc("GET /agent/v1/config", a.agentAuth(a.handleAgentConfig))
 	mux.HandleFunc("POST /agent/v1/report", a.agentAuth(a.handleAgentReport))
+	mux.HandleFunc("POST /agent/v1/leave", a.agentAuth(a.handleAgentLeave))
 	mux.HandleFunc("GET /agent/v1/download/{name}", a.handleAgentDownload)
 	mux.HandleFunc("/agent/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, 404, "接口不存在") })
 	files := http.FileServerFS(a.Web)

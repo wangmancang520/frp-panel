@@ -103,6 +103,12 @@ func EnforceLocalAdmin(d Doc, defPort int, genSecret func() string) {
 	set(d, "log.disablePrintColor", true)
 }
 
+// SetAdminPort moves FRP's local admin API to port, keeping it on loopback.
+func SetAdminPort(d Doc, port int) {
+	set(d, "webServer.addr", "127.0.0.1")
+	set(d, "webServer.port", int64(port))
+}
+
 func NewServerDoc(bindPort int, token string, genSecret func() string) Doc {
 	d := Doc{}
 	_ = ApplyServer(d, ServerSettings{BindPort: bindPort, Token: token, TLSForce: true, LogLevel: "info", LogMaxDays: 7})

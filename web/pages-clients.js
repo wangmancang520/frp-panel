@@ -206,7 +206,7 @@ export function JoinCard({ go }) {
   return html`<div class="card">
     <div class="card-head"><h2>添加客户端</h2><div class="grow"></div>
       <button class="btn sm ghost" disabled=${busy} onClick=${reset} title="让旧命令失效">${icon('refresh')}重置命令</button></div>
-    <p class="desc">在内网机器（Ubuntu/Debian）上以 root 运行下面的命令。它会从本面板下载程序、自动注册，之后所有配置都在这里管理，客户端无需任何操作。同一条命令可以用于多台机器。</p>
+    <p class="desc">在内网机器（Ubuntu/Debian）上以 root 运行下面的命令。它会从本面板下载程序、自动注册，之后所有配置都在这里管理，客户端无需任何操作。同一条命令可以用于多台机器；一台机器也可以同时接入多台服务端。客户端本机用 <code>sudo frp-client</code> 管理（列表、日志、删除某台服务端、卸载），服务端失联时也能使用。</p>
     ${join.error && html`<${Alert} kind="err">${join.error.message}<//>`}
     ${d ? html`<div>
       ${!d.publicAddrSet && html`<${Alert} kind="warn">命令中的地址 ${d.host} 取自当前浏览器访问的地址。如果客户端访问不到它，请到「系统」页设置公网地址。<//>`}

@@ -247,6 +247,17 @@ func (a *App) handleAgentReport(w http.ResponseWriter, r *http.Request, c fleet.
 	writeJSON(w, 200, a.Fleet.SetReport(c.ID, clientIP(r), rep))
 }
 
+// handleAgentLeave removes the calling client, when its owner removes this
+// server from the machine (frp-client remove / uninstall).
+func (a *App) handleAgentLeave(w http.ResponseWriter, r *http.Request, c fleet.Client) {
+	if err := a.Fleet.Delete(c.ID); err != nil {
+		writeErr(w, 404, err.Error())
+		return
+	}
+	log.Printf("client %s (%s) left from %s", c.ID, c.Name, clientIP(r))
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
 // ---- binaries for agents ----
 
 var archNames = map[string]string{"amd64": "amd64", "arm64": "arm64", "arm_hf": "armv7", "arm": ""} // FRP name -> panel release name

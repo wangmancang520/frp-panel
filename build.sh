@@ -18,5 +18,5 @@ build amd64 amd64
 build arm64 arm64
 build arm armv7 7
 (cd dist && sha256sum frp-panel-linux-* > sha256sums.txt 2>/dev/null || shasum -a 256 frp-panel-linux-* > sha256sums.txt)
-cp install.sh dist/
+cp install.sh client.sh dist/
 ls -lh dist

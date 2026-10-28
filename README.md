@@ -6,7 +6,8 @@
 - **客户端一条命令接入**：面板给出接入命令，在内网机器上运行即可。程序从服务端下载，本机无需任何配置，也不开放任何端口
 - **集中管理**：在服务端面板为每台客户端添加代理（SSH、远程桌面、网站等模板），保存后几秒内自动下发并热重载；查看每台客户端的在线状态、代理状态、错误原因和日志
 - **统一升级**：服务端升级 FRP 或面板后，客户端自动跟随升级
-- **一体化管理工具**：每台机器上的 `sudo frp-panel-ctl` 提供交互菜单，可以查看状态、更新、回滚、查看日志和卸载；每次变更前自动备份
+- **一台客户端接入多台服务端**：每台服务端在客户端上是独立的实例，各自跟随所属服务端的版本，互不影响；重复运行接入命令会沿用原有身份
+- **管理工具**：服务端用 `sudo frp-panel-ctl`（状态、更新、回滚、日志、卸载，变更前自动备份）；客户端用 `sudo frp-client`（列出已接入的服务端、日志、删除某台服务端、全部卸载），**服务端失联时也能使用**
 - **通用功能**：实时流量、frps 设置表单、原始 TOML 编辑（保存前用 `frps/frpc verify` 校验）、GitHub 镜像
 - **HTTPS 证书**：「证书」页一键为面板域名申请 Let's Encrypt 证书（先检查条件，失败时给出具体原因），也可以上传证书
 - **单文件部署**：Go 后端内嵌前端，无需 Node、Nginx 或数据库
@@ -40,22 +41,55 @@ curl -fsSLk --pinnedpubkey 'sha256//...' 'https://1.2.3.4:7600/join.sh' | sudo b
 
 接入后，客户端会出现在服务端面板的「客户端」页。点进去就能添加代理、修改传输设置、查看日志、重启 frpc，客户端上不需要做任何操作。
 
-### 管理：frp-panel-ctl
+- **接入多台服务端**：在同一台机器上运行另一台服务端的接入命令即可，每台服务端在本机是一个独立的实例（默认按面板地址命名，如 `45-192-243-39`，也可以加 `--name 名称` 指定）
+- **重复运行接入命令**：同一台服务端的命令再运行一次，会沿用原有身份重新接入（重新下载程序和配置），不会产生重复的客户端；加 `--force` 才会注册为新的客户端
 
-安装后，服务端和客户端上都有 `frp-panel-ctl`。不带参数运行会打开交互菜单，菜单内容按本机角色变化：
+### 客户端管理：frp-client
+
+接入后客户端上会有 `frp-client`。它只操作本机，**服务端失联时也能使用**，主要用来清理和卸载。不带参数运行会打开交互菜单：
+
+```bash
+sudo frp-client
+```
+
+| 命令 | 作用 |
+|---|---|
+| `list` | 列出已接入的服务端：实例名、面板地址、客户端 ID、frpc / agent 状态、代理数量、面板是否可连接（`--offline` 跳过连通性检查） |
+| `show <名称>` | 某台服务端的详情：版本、本地管理端口、文件位置、本机当前的代理列表、agent 最近日志 |
+| `logs <名称>` | frpc 日志（`--agent` 看 agent 日志，`-f` 持续跟踪） |
+| `start` / `stop` / `restart <名称>` | 启停某台服务端的 frpc 和 agent（`--all` 全部） |
+| `update <名称>` | 立即从该服务端面板重新下载 frp-panel 和 frpc（`--all` 全部；连不上的跳过） |
+| `remove <名称>` | 删除一台服务端：先尝试在服务端注销本机，再停止并卸载它的 frpc 与 agent、清除本机配置。服务端失联时只清理本机（之后可在面板里手动删除这台客户端）；`--keep-on-server` 不注销 |
+| `uninstall` | 删除全部服务端，并卸载客户端程序和 `frp-client` 本身 |
+| `join` | 接入一台服务端（接入命令会自动调用，也可以在菜单里粘贴接入命令） |
+| `migrate` | 把 v0.2 的单服务端布局迁移为实例布局（见下） |
+
+本机的 `frp-client` 被误删时，可以直接从 GitHub 运行同一个脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wangmancang520/frp-panel/main/client.sh | sudo bash -s -- uninstall
+```
+
+**从 v0.2 升级的客户端**：v0.2 的客户端只能接入一台服务端（`frpc` / `frp-panel-agent` 服务）。接入新的服务端时会自动把它迁移为实例，客户端身份不变；如果它所属的服务端还没升级（程序太旧，不支持实例），就暂时保留原样继续运行，在 `frp-client list` 中显示为 `legacy`，等那台服务端升级后运行 `sudo frp-client migrate`。
+
+### 服务端管理：frp-panel-ctl
+
+服务端上有 `frp-panel-ctl`，不带参数运行会打开交互菜单：
 
 ```bash
 sudo frp-panel-ctl
 ```
 
-| 菜单项 / 命令 | 服务端 | 客户端 |
-|---|---|---|
-| `status` 查看状态 | 版本、服务状态、面板地址、证书指纹、接入命令 | 版本、服务状态、所属面板、agent 最近日志 |
-| `update` 更新 | 面板来源可选 GitHub 最新版、指定版本或本地 `dist/` 目录；FRP 可保持、升级到最新或指定版本 | 立即从面板重新下载 frp-panel 和 frpc（版本号相同也会重新下载） |
-| `rollback` 回滚 | 恢复到某次备份：只恢复程序，或程序和配置一起恢复 | 同左 |
-| `restart` / `logs` | 重启、查看日志（可持续跟踪） | 同左 |
-| `reset-password` | 重置管理员密码 | — |
-| `uninstall` | 卸载；加 `--purge` 同时删除配置 | 同左 |
+| 菜单项 / 命令 | 作用 |
+|---|---|
+| `status` 查看状态 | 版本、服务状态、面板地址、证书指纹、接入命令 |
+| `update` 更新 | 面板来源可选 GitHub 最新版、指定版本或本地 `dist/` 目录；FRP 可保持、升级到最新或指定版本 |
+| `rollback` 回滚 | 恢复到某次备份：只恢复程序，或程序和配置一起恢复 |
+| `restart` / `logs` | 重启、查看日志（可持续跟踪） |
+| `reset-password` | 重置管理员密码 |
+| `uninstall` | 卸载；加 `--purge` 同时删除配置 |
+
+在客户端上运行 `frp-panel-ctl` 或 `install.sh` 的 status / update / logs / restart / uninstall，会转交给 `frp-client`。
 
 每次更新、回滚、重新安装和 `--purge` 卸载前，都会自动把程序和配置备份到 `/var/backups/frp-panel`，保留最近 5 份。命令行用法见 `frp-panel-ctl --help`，例如：
 
@@ -65,16 +99,14 @@ sudo frp-panel-ctl rollback -y                               # 回滚到最近�
 sudo frp-panel-ctl rollback --with-config --backup 20261026-213135
 ```
 
-`frp-panel-ctl` 内置在 frp-panel 程序中，每次更新后自动换成新版本。客户端的 agent 在后台自动升级时，下次运行 `frp-panel-ctl` 也会先换成新版本。未安装时，直接运行 `install.sh`（不带参数）也会打开菜单。
+`frp-panel-ctl` 和 `frp-client` 都内置在 frp-panel 程序中，会随更新自动换成新版本（客户端接入了多台不同版本的服务端时，保留最新的 `frp-client`，它兼容所有旧布局）。未安装时，直接运行 `install.sh`（不带参数）也会打开菜单。
 
 ### 多轮更新测试
 
 1. `./build.sh` 编译全部架构到 `dist/`。版本号取自 `git describe --dirty`，也可以用 `VERSION=0.2.0-test1 ./build.sh` 指定，每轮用不同的版本号
 2. 把 `dist/` 复制到服务端，运行 `sudo frp-panel-ctl update --panel-bin dist`。服务端会同时缓存其他架构的 frp-panel，开发版本也能分发给 ARM 客户端
-3. 客户端会在一分钟内自动跟随服务端的 frp-panel 和 FRP 版本。想立即更新，可以在客户端运行 `sudo frp-panel-ctl update`
-4. 有问题时运行 `sudo frp-panel-ctl rollback`，客户端会跟随服务端回到原来的版本
-
-客户端被删除或需要彻底清理时，可以不依赖本地文件，直接用面板提供的脚本卸载：`curl -fsSLk --pinnedpubkey '<pin>' https://<服务端>:7600/join.sh | sudo bash -s -- uninstall --purge`。
+3. 客户端会在一分钟内自动跟随服务端的 frp-panel 和 FRP 版本。想立即更新，可以在客户端运行 `sudo frp-client update --all`
+4. 有问题时在服务端运行 `sudo frp-panel-ctl rollback`，客户端会跟随服务端回到原来的版本
 
 ## 客户端是怎么被管理的
 
@@ -92,7 +124,17 @@ frpc ─────────────── FRP 协议（TLS） ───
 - **统一参数**：`serverAddr`、`serverPort`、`auth.token`、`user` 由服务端统一填写（`user` 是客户端 ID，因此不同客户端的代理名不会冲突）。修改 frps 的端口或令牌、或修改面板的公网地址后，所有客户端会自动更新
 - **端口冲突**：保存代理时会检查其他客户端是否已占用同一个远程端口
 - **程序分发**：服务端安装时同时装好 frpc。客户端架构与服务端相同时直接分发本机程序；不同时，面板从 GitHub 下载对应架构的官方 FRP（按校验文件验证）和 frp-panel 发布版本，并缓存在 `/etc/frp-panel/cache`
-- **删除**：在面板删除客户端后，它的凭据立即失效，agent 会停止 frpc。重新运行接入命令可以再次接入
+- **删除**：在面板删除客户端后，它的凭据立即失效，agent 会停止 frpc。重新运行接入命令可以再次接入。反过来，在客户端运行 `frp-client remove` 时会先在服务端注销本机
+- **一台客户端、多台服务端**：每台服务端在客户端上是一个独立的实例，有自己的身份、程序和服务，各自跟随所属服务端的版本：
+
+  ```
+  /etc/frp-panel/servers/<名称>/agent.json    身份（面板地址、公钥固定值、凭据、本地管理端口）
+  /etc/frp/<名称>/frpc.toml                    frpc 配置
+  /usr/local/lib/frp-panel/<名称>/             frp-panel 和 frpc 程序
+  frpc@<名称>、frp-panel-agent@<名称>           systemd 服务
+  ```
+
+  服务端渲染的配置里 frpc 本地管理端口都是 7400，agent 写入前会换成本机为该实例分配的端口（从 7401 起），多个 frpc 因此不会冲突
 - **接入密钥泄露**：在「客户端」页点击「重置命令」，旧命令立即失效，已接入的客户端不受影响
 
 ## FRP 两端分别需要什么
@@ -154,6 +196,7 @@ internal/agent          客户端 agent（注册、同步配置、升级、上�
 internal/api            HTTP 接口（面板 /api/*，agent /agent/v1/*）
 web/                    前端（Preact + htm，无需构建，已内置在 vendor/）
 install.sh              安装 / 更新 / 回滚 / 卸载管理脚本（安装后即 frp-panel-ctl），内嵌进程序，由面板在 /join.sh 提供
+client.sh               客户端本机管理脚本（安装后即 frp-client），内嵌进程序；接入、多服务端实例、离线清理与卸载
 build.sh                交叉编译 linux amd64 / arm64 / armv7
 ```
 
@@ -178,7 +221,8 @@ ssh root@server 'cd /root/frp-panel && bash install.sh server'   # 会自动使�
 ```bash
 go test ./...
 # 安装脚本的所有路径都可以用环境变量改到别处（FRP_PANEL_DATA_DIR、FRP_PANEL_FRP_DIR、FRP_PANEL_BIN_DIR、
-# FRP_PANEL_SYSTEMD_DIR、FRP_PANEL_BACKUP_DIR、FRP_PANEL_CTL_PATH），FRP_PANEL_ALLOW_NONROOT=1 允许非 root 运行，
+# FRP_PANEL_SYSTEMD_DIR、FRP_PANEL_BACKUP_DIR、FRP_PANEL_CTL_PATH，以及 client.sh 的 FRP_PANEL_LIB_DIR、
+# FRP_CLIENT_PATH），FRP_PANEL_ALLOW_NONROOT=1 允许非 root 运行，
 # 配合一个模拟的 systemctl / journalctl 就能在沙盒里反复测试安装、更新、回滚和卸载
 # 不依赖 systemd 的调试方式：--proc exec 让面板直接托管 frps/frpc 进程
 go run . init --role server --data ./dev/s --frp-dir ./dev/s --bin-dir /path/to/frp --listen 127.0.0.1:7600 --proc exec

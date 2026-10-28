@@ -35,6 +35,12 @@ var webFS embed.FS
 //go:embed install.sh
 var installScript []byte
 
+// clientScript is frp-client, the local management script on client
+// machines; install.sh extracts it from the downloaded binary.
+//
+//go:embed client.sh
+var clientScript []byte
+
 const usage = `FRP Panel — 一键部署与集中管理 FRP
 
 Usage:
@@ -43,9 +49,11 @@ Usage:
   frp-panel agent enroll --panel URL --pin PIN --key KEY
                                                  把本机注册为受管客户端（由 install.sh 调用）
   frp-panel agent run [--data DIR]               运行客户端 agent
+  frp-panel agent leave [--data DIR]             从服务端注销本机（frp-client 删除服务端时调用）
   frp-panel reset-password [--data DIR]          重置管理员密码
   frp-panel info [--data DIR]                    显示访问地址、证书指纹与客户端接入命令
   frp-panel install-script                       输出内置的安装 / 管理脚本
+  frp-panel client-script                        输出内置的客户端管理脚本（frp-client）
   frp-panel version
 `
 
@@ -72,6 +80,8 @@ func main() {
 		// Used by the installer to refresh frp-panel-ctl after an update,
 		// so the management script always matches the installed binary.
 		_, err = os.Stdout.Write(installScript)
+	case "client-script":
+		_, err = os.Stdout.Write(clientScript)
 	default:
 		fmt.Print(usage)
 		os.Exit(2)
@@ -254,14 +264,19 @@ func cmdAgent(args []string) error {
 	pin := fl.String("pin", "", "[enroll] panel public key pin (sha256//...)")
 	key := fl.String("key", "", "[enroll] enrollment key from the join command")
 	force := fl.Bool("force", false, "[enroll] register again even if already enrolled")
+	unit := fl.String("unit", "frpc", "[run] frpc systemd unit of this server instance")
+	scriptPath := fl.String("client-script-path", "/usr/local/sbin/frp-client", "[run] frp-client to refresh when this binary carries a newer one")
 	_ = fl.Parse(args[1:])
-	o := agent.Options{Data: *data, FRPDir: *frpDir, BinDir: *binDir, Version: version}
+	o := agent.Options{Data: *data, FRPDir: *frpDir, BinDir: *binDir, Version: version,
+		Unit: *unit, ClientScript: clientScript, ClientScriptPath: *scriptPath}
 	switch args[0] {
 	case "enroll":
 		if *panel == "" || *pin == "" || *key == "" {
 			return errors.New("agent enroll 需要 --panel、--pin 和 --key（请使用服务端面板提供的接入命令）")
 		}
 		return agent.Enroll(o, *panel, *pin, *key, *force)
+	case "leave":
+		return agent.Leave(o)
 	case "run":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
