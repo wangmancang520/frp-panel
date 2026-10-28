@@ -35,7 +35,7 @@ TARGET=""
 PANEL_URL=""
 PIN=""
 ENROLL_KEY=""
-NAME=""
+INSTANCE_NAME=""
 BINARY=""
 FORCE=0
 YES=0
@@ -87,7 +87,7 @@ parse_args() {
       --panel)          PANEL_URL="$2"; shift 2 ;;
       --pin)            PIN="$2"; shift 2 ;;
       --key)            ENROLL_KEY="$2"; shift 2 ;;
-      --name)           NAME="$2"; shift 2 ;;
+      --name)           INSTANCE_NAME="$2"; shift 2 ;;
       --binary)         BINARY="$2"; shift 2 ;;
       --force)          FORCE=1; shift ;;
       --all)            ALL=1; shift ;;
@@ -247,6 +247,32 @@ unique_name() {
   local base="$1" n="$1" i=2
   while exists "$n" || [[ -e "$SERVERS/$n" ]]; do
     n="${base:0:29}-$i"; i=$((i + 1))
+  done
+  echo "$n"
+}
+
+# name_problem NAME: why NAME cannot be used for a new instance ("" if it can).
+name_problem() {
+  if ! valid_name "$1"; then
+    echo "实例名称 “$1” 无效：只能包含小写字母、数字和 -（以字母或数字开头，最长 32 个字符），且不能是 ${LEGACY}"
+  elif exists "$1" || [[ -e "$SERVERS/$1" ]]; then
+    echo "实例 $1 已存在（连接的是另一台服务端）"
+  fi
+}
+
+# pick_name [NAME]: the name for a new instance — NAME (lower-cased) when
+# usable, otherwise one derived from the panel address. When NAME cannot be
+# used, asks for another in the terminal instead of giving up.
+pick_name() {
+  local n suggestion p
+  suggestion=$(unique_name "$(derive_name "$PANEL_URL")")
+  [[ -n "$1" ]] || { echo "$suggestion"; return; }
+  n=$(echo "$1" | tr 'A-Z' 'a-z')
+  while p=$(name_problem "$n"); [[ -n "$p" ]]; do
+    have_tty || die "$p。请用 --name 指定其他名称，或去掉 --name 使用默认名称 ${suggestion}"
+    warn "$p"
+    n=$(ask "请输入实例名称（直接回车使用默认名称）" "$suggestion") || exit 1
+    n=$(echo "$n" | tr 'A-Z' 'a-z')
   done
   echo "$n"
 }
@@ -469,14 +495,10 @@ cmd_join() {
     die "本机已以旧版布局接入该服务端（${LEGACY}），且暂时无法迁移。请先升级该服务端，或运行 frp-client remove ${LEGACY} 后再接入"
   elif [[ -n "$name" ]]; then
     rejoin=1
-    [[ -z "$NAME" || "$NAME" == "$name" ]] || warn "该服务端已接入为实例 ${name}，忽略 --name ${NAME}"
+    [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "$name" ]] || warn "该服务端已接入为实例 ${name}，忽略 --name ${INSTANCE_NAME}"
     info "该服务端已接入为实例 ${name}，将沿用原有身份重新接入$( (( FORCE )) && echo '（--force：重新注册为新的客户端）')"
-  elif [[ -n "$NAME" ]]; then
-    valid_name "$NAME" || die "实例名称只能包含小写字母、数字和 -（最长 32 个字符），且不能是 ${LEGACY}"
-    exists "$NAME" && die "实例 ${NAME} 已存在（连接的是另一台服务端），请换一个名称"
-    name="$NAME"
   else
-    name=$(unique_name "$(derive_name "$PANEL_URL")")
+    name=$(pick_name "$INSTANCE_NAME")
   fi
 
   tmp=$(mktemp -d)
@@ -746,7 +768,7 @@ menu() {
       1) run_action cmd_list ;;   2) run_action cmd_show ;;   3) run_action cmd_logs ;;
       4) run_action cmd_service restart ;; 5) run_action cmd_service stop ;; 6) run_action cmd_service start ;;
       7) run_action cmd_update ;;
-      8) PANEL_URL=""; PIN=""; ENROLL_KEY=""; NAME=""; run_action cmd_join ;;
+      8) PANEL_URL=""; PIN=""; ENROLL_KEY=""; INSTANCE_NAME=""; run_action cmd_join ;;
       9) run_action cmd_remove ;; 10) run_action cmd_uninstall; [[ -z "$(instances)" ]] && return ;;
       11) return ;;
     esac

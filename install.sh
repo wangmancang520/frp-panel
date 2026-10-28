@@ -37,7 +37,7 @@ TOKEN=""
 PANEL_URL=""
 PIN=""
 ENROLL_KEY=""
-NAME=""           # agent: instance name for this server on the client
+INSTANCE_NAME=""  # agent: instance name for this server on the client
 FIREWALL=1
 PURGE=0
 FORCE=0
@@ -121,7 +121,7 @@ parse_args() {
       --panel)         PANEL_URL="$2"; shift 2 ;;
       --pin)           PIN="$2"; shift 2 ;;
       --key)           ENROLL_KEY="$2"; shift 2 ;;
-      --name)          NAME="$2"; shift 2 ;;
+      --name)          INSTANCE_NAME="$2"; shift 2 ;;
       --backup)        BACKUP_ID="$2"; shift 2 ;;
       --with-config)   WITH_CONFIG=1; shift ;;
       --follow|-f)     FOLLOW=1; shift ;;
@@ -200,12 +200,15 @@ require_root() {
 
 check_os() {
   command -v systemctl >/dev/null || die "需要 systemd"
-  if [[ -r /etc/os-release ]]; then
+  local rel="${FRP_PANEL_OS_RELEASE:-/etc/os-release}" os
+  if [[ -r "$rel" ]]; then
+    # Read it in a subshell: os-release defines NAME, VERSION, ID… which
+    # must not overwrite this script's variables.
     # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}${ID_LIKE:-}" in
+    os=$(. "$rel" && echo "${ID:-}${ID_LIKE:-}|${PRETTY_NAME:-此系统}")
+    case "${os%%|*}" in
       *ubuntu*|*debian*) ;;
-      *) warn "未在 ${PRETTY_NAME:-此系统} 上测试，将继续尝试" ;;
+      *) warn "未在 ${os#*|} 上测试，将继续尝试" ;;
     esac
   fi
 }
@@ -718,7 +721,7 @@ do_agent() {
   if [[ -f "$CLIENT_PATH" ]] && (( ${have:-0} > ${mine:-0} )); then script="$CLIENT_PATH"; fi
 
   local args=(join --panel "$PANEL_URL" --pin "$PIN" --key "$ENROLL_KEY" --binary "$WORK/frp-panel")
-  [[ -n "$NAME" ]] && args+=(--name "$NAME")
+  [[ -n "$INSTANCE_NAME" ]] && args+=(--name "$INSTANCE_NAME")
   (( FORCE )) && args+=(--force)
   (( YES )) && args+=(-y)
   FRP_CLIENT_PATH="$CLIENT_PATH" bash "$script" "${args[@]}"
