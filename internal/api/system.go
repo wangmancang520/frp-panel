@@ -25,6 +25,9 @@ func (a *App) loadDoc() (frp.Doc, error) {
 // agents know, since their configs are rendered from it (port, token, TLS).
 func (a *App) applyDoc(d frp.Doc) (string, error) {
 	cfg := a.St.Get()
+	if err := a.frpsPortConflict(d); err != nil {
+		return "", err
+	}
 	frp.EnforceLocalAdmin(d, 7500, randomSecret)
 	b, err := d.Marshal()
 	if err != nil {
@@ -219,6 +222,10 @@ func (a *App) handleTLSPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	if what := a.frpsOn80(); req.Mode == store.TLSACME && what != "" && a.panelPort() != 443 {
+		writeErr(w, 400, frps80Problem(what))
+		return
+	}
 	cfg := a.St.Get()
 	if err := a.TLS.Configure(req.Mode, req.Domain, req.Email, cfg.TLS.ExtraSANs); err != nil {
 		_ = a.TLS.Configure(cfg.TLS.Mode, cfg.TLS.Domain, cfg.TLS.Email, cfg.TLS.ExtraSANs)
@@ -233,6 +240,8 @@ func (a *App) handleTLSPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Mode == store.TLSACME {
 		a.warmACME()
+	} else {
+		a.stopHTTP80() // free :80 for frps
 	}
 	a.handleTLSGet(w, r)
 }
@@ -280,6 +289,7 @@ func (a *App) handleTLSCustom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.St.Update(func(c *store.Config) { c.TLS.Mode = store.TLSCustom })
+	a.stopHTTP80() // free :80 for frps
 	a.handleTLSGet(w, r)
 }
 

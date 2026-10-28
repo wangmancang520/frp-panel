@@ -125,3 +125,16 @@ func verifyIfAvailable(t *testing.T, name string, content []byte) {
 		t.Errorf("%s verify failed: %v\n%s", name, err, content)
 	}
 }
+
+func TestTCPPorts(t *testing.T) {
+	d := NewServerDoc(7000, "token-123456", secret)
+	s := ReadServer(d)
+	s.VhostHTTPPort, s.VhostHTTPSPort, s.KCPBindPort = 80, 443, 7000
+	if err := ApplyServer(d, s); err != nil {
+		t.Fatal(err)
+	}
+	got := TCPPorts(d)
+	if len(got) != 3 || got[80] == "" || got[443] == "" || got[7000] == "" {
+		t.Errorf("unexpected TCP ports (KCP is UDP and must not appear twice): %v", got)
+	}
+}

@@ -10,23 +10,71 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"frp-panel/internal/auth"
+	"frp-panel/internal/frp"
 	"frp-panel/internal/store"
 )
 
 const probePath = "/.well-known/acme-challenge/frp-panel-probe"
 
+// ---- port 80 ownership ----
+//
+// Let's Encrypt's HTTP-01 validation (and every renewal) needs :80, which
+// frps may also want for vhostHTTPPort. Only one of them can listen there,
+// so the panel holds :80 only while it is in ACME mode (or briefly for the
+// certificate checks), and frps settings that would collide are refused.
+
+func (a *App) panelPort() int {
+	_, p, _ := net.SplitHostPort(a.St.Get().Listen)
+	n, _ := strconv.Atoi(p)
+	return n
+}
+
+// needsHTTP80 reports whether the panel must own :80 for its certificate.
+// On :443 the panel validates with TLS-ALPN-01 instead.
+func (a *App) needsHTTP80() bool {
+	return a.St.Get().TLS.Mode == store.TLSACME && a.panelPort() != 443
+}
+
+// frpsOn80 names the frps setting currently using port 80 ("" if none).
+func (a *App) frpsOn80() string {
+	d, err := a.loadDoc()
+	if err != nil {
+		return ""
+	}
+	return frp.TCPPorts(d)[80]
+}
+
+func frps80Problem(what string) string {
+	return "frps 的" + what + "正在使用 80 端口，Let's Encrypt 验证需要由面板监听 80 端口。" +
+		"请到「服务端设置」把它改成其他端口（如 8080），或改用「上传证书」"
+}
+
+// frpsPortConflict refuses an frps config that would listen on the panel's
+// own HTTPS port, or on :80 while the panel needs it for Let's Encrypt.
+func (a *App) frpsPortConflict(d frp.Doc) error {
+	ports := frp.TCPPorts(d)
+	if what, ok := ports[a.panelPort()]; ok {
+		return fmt.Errorf("frps 的%s %d 与面板自身的 HTTPS 端口相同，请换一个端口", what, a.panelPort())
+	}
+	if what, ok := ports[80]; ok && a.needsHTTP80() {
+		return fmt.Errorf("frps 的%s不能设为 80：面板正在用 80 端口为域名证书（Let's Encrypt）完成验证和自动续期。"+
+			"请改用其他端口（如 8080），或先到「证书」页改用上传证书 / 仅自签名", what)
+	}
+	return nil
+}
+
 // startHTTP80 serves Let's Encrypt HTTP-01 challenges (and a self-check
-// probe) on :80; every other request is redirected to the HTTPS panel. It
-// starts once, on demand, and keeps running.
+// probe) on :80; every other request is redirected to the HTTPS panel.
 func (a *App) startHTTP80() error {
 	a.http80Mu.Lock()
 	defer a.http80Mu.Unlock()
-	if a.http80On {
+	if a.http80Srv != nil {
 		return nil
 	}
 	if a.probeToken == "" {
@@ -52,9 +100,23 @@ func (a *App) startHTTP80() error {
 	if err != nil {
 		return err
 	}
-	a.http80On = true
-	go func() { _ = (&http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}).Serve(ln) }()
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	a.http80Srv = srv
+	go func() { _ = srv.Serve(ln) }()
 	return nil
+}
+
+// stopHTTP80 releases :80 (so frps can use it) unless the panel needs it.
+func (a *App) stopHTTP80() {
+	if a.St.Get().TLS.Mode == store.TLSACME {
+		return
+	}
+	a.http80Mu.Lock()
+	defer a.http80Mu.Unlock()
+	if a.http80Srv != nil {
+		_ = a.http80Srv.Close()
+		a.http80Srv = nil
+	}
 }
 
 // port80Problem explains why :80 could not be opened.
@@ -124,11 +186,21 @@ func (a *App) tlsChecks(ctx context.Context, domain string) []tlsCheck {
 		}
 	}
 
-	// Port 80 for the HTTP-01 challenge.
+	// Port 80 for the HTTP-01 challenge. Unless the panel is in ACME mode
+	// (and so keeps :80), it is only held for the probe below.
+	if what := a.frpsOn80(); what != "" {
+		if a.panelPort() == 443 {
+			add("本机 80 端口", "info", "frps 的"+what+"占用了 80 端口；面板监听 443 端口，会改用 TLS-ALPN 验证，不需要 80 端口")
+			return out
+		}
+		add("本机 80 端口", "fail", frps80Problem(what))
+		return out
+	}
 	if err := a.startHTTP80(); err != nil {
 		add("本机 80 端口", "fail", port80Problem(err))
 		return out
 	}
+	defer a.stopHTTP80()
 	add("本机 80 端口", "ok", "面板正在监听 80 端口，用于 Let's Encrypt 验证（其他请求会跳转到 HTTPS 面板）")
 
 	// Self-check through the domain. From the server itself this only proves
@@ -203,11 +275,14 @@ func (a *App) handleTLSIssue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请输入完整的域名，例如 panel.example.com")
 		return
 	}
-	if err := a.startHTTP80(); err != nil {
-		if _, port, _ := net.SplitHostPort(a.St.Get().Listen); port != "443" {
-			writeErr(w, 400, port80Problem(err)+"，无法进行 Let's Encrypt 验证")
+	if what := a.frpsOn80(); what != "" {
+		if a.panelPort() != 443 {
+			writeErr(w, 400, frps80Problem(what))
 			return
 		}
+	} else if err := a.startHTTP80(); err != nil && a.panelPort() != 443 {
+		writeErr(w, 400, port80Problem(err)+"，无法进行 Let's Encrypt 验证")
+		return
 	}
 	cfg := a.St.Get()
 	if cfg.TLS.Mode != store.TLSACME || cfg.TLS.Domain != domain || cfg.TLS.Email != email {
@@ -242,10 +317,15 @@ func (a *App) handleTLSIssue(w http.ResponseWriter, r *http.Request) {
 // warmACME loads (or obtains) the ACME certificate at startup, so it is
 // ready, and renewed, even if nobody visits the panel by its domain.
 func (a *App) warmACME() {
-	if err := a.startHTTP80(); err != nil {
-		if _, port, _ := net.SplitHostPort(a.St.Get().Listen); port != "443" {
-			a.TLS.SetACMEError("无法监听 80 端口进行 HTTP-01 验证（" + err.Error() + "）；请释放 80 端口，或让面板监听 443 端口")
+	if what := a.frpsOn80(); what != "" {
+		if a.panelPort() != 443 {
+			// Issuing would only fail; a cached certificate still loads on the
+			// first visit by name.
+			a.TLS.SetACMEError(frps80Problem(what))
+			return
 		}
+	} else if err := a.startHTTP80(); err != nil && a.panelPort() != 443 {
+		a.TLS.SetACMEError(port80Problem(err) + "，无法进行 HTTP-01 验证；请释放 80 端口，或让面板监听 443 端口")
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

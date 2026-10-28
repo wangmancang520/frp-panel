@@ -154,6 +154,25 @@ func formatPortRanges(v any) string {
 	return strings.Join(parts, ",")
 }
 
+// TCPPorts maps each TCP port frps listens on (besides proxy remote ports)
+// to the setting that opens it, e.g. 80 -> "HTTP 端口（vhostHTTPPort）".
+func TCPPorts(d Doc) map[int]string {
+	out := map[int]string{}
+	for _, k := range []struct{ key, label string }{
+		{"bindPort", "监听端口（bindPort）"},
+		{"vhostHTTPPort", "HTTP 端口（vhostHTTPPort）"},
+		{"vhostHTTPSPort", "HTTPS 端口（vhostHTTPSPort）"},
+		{"tcpmuxHTTPConnectPort", "TCPMux 端口（tcpmuxHTTPConnectPort）"},
+	} {
+		if p := getInt(d, k.key); p > 0 {
+			if _, dup := out[p]; !dup {
+				out[p] = k.label
+			}
+		}
+	}
+	return out
+}
+
 // ServerPorts lists every port frps listens on publicly, for firewall hints.
 func ServerPorts(d Doc) []string {
 	var out []string

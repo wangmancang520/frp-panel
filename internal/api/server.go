@@ -45,8 +45,8 @@ type App struct {
 	ver   string
 	verAt time.Time
 
-	http80Mu   sync.Mutex // guards the on-demand :80 listener (startHTTP80)
-	http80On   bool
+	http80Mu   sync.Mutex   // guards the on-demand :80 listener (startHTTP80)
+	http80Srv  *http.Server // nil when :80 is not held
 	probeToken string
 }
 
